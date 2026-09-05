@@ -251,6 +251,11 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         self.ensemble_m = 0.0  # chunk weight exp(-m * age); m>0 favours newer
         self.chunk_fn = None  # optional post-hoc projection of the normalized chunk
         self.deviation = 0.0  # >0: weight on action distance from candidate 0
+        self.guidance = None  # optional cost gradient on the normalized plan
+        self.guide_scale = 0.0
+        self.guide_from = 1.0  # flow time from which the guidance applies
+        self.prior_delta = 0.0  # >0: re-noise the shifted last plan to 1-delta
+        self.prior_stretch = True  # re-time the remainder over the horizon, else hold
         self.replans = 0
         self.dirty = 0
         self.last_dirty = None
@@ -269,6 +274,8 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         self.frame = 0
         self.latched_cond = None  # per-world bend picked at the first replan
         self.latched_idx = None
+        self.plan = None
+        self.plan_frame = 0
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         # full-trajectory window: [state, action] per step, both normalized. The
@@ -310,17 +317,24 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         goal: Tensor,
         cond: Tensor | None,
         cloud: Tensor | None = None,
+        t0: float = 0.0,
     ) -> Tensor:
-        """ODE-integrate x from 0 to 1, re-clamping the boundary frames each step."""
+        """ODE-integrate x from t0 to 1, re-clamping the boundary frames each step."""
         sd, gd = self.state_dim, self.config.goal_dim
         gs = self.config.goal_state_start
-        dt = 1.0 / self.config.num_inference_steps
-        for i in range(self.config.num_inference_steps):
-            t = torch.full((x.shape[0],), i * dt, device=x.device)
+        n = max(1, math.ceil((1 - t0) * self.config.num_inference_steps - 1e-6))
+        dt = (1 - t0) / n
+        for i in range(n):
+            t = torch.full((x.shape[0],), t0 + i * dt, device=x.device)
             x = x.clone()
             x[:, 0, :sd] = state
             x[:, -1, gs : gs + gd] = goal
             x = x + dt * self.model(x, t, cond, None, cloud)
+            if (
+                self.guidance is not None
+                and t0 + (i + 1) * dt >= self.guide_from - 1e-6
+            ):
+                x = x - self.guide_scale * self.guidance(x)
         return x
 
     @torch.no_grad()
@@ -355,6 +369,20 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         state, goal = obs[:, :sd], obs[:, sd:]
         m = obs.shape[0]
         x = torch.randn(m, self.config.horizon, self.traj_dim, device=obs.device)
+        t0 = 0.0
+        if self.prior_delta > 0 and self.plan is not None:
+            p = self.plan[:, self.frame - self.plan_frame :]
+            if self.prior_stretch:
+                p = p.transpose(1, 2)
+                p = F.interpolate(
+                    p, self.config.horizon, mode="linear", align_corners=True
+                )
+                p = p.transpose(1, 2)
+            else:
+                tail = p[:, -1:].expand(-1, self.config.horizon - p.shape[1], -1)
+                p = torch.cat([p, tail], dim=1)
+            t0 = 1.0 - self.prior_delta
+            x = (1 - t0) * x + t0 * p.repeat_interleave(k, 0)
         # micro-batch cap for a 24GB card: memory scales with horizon, so hold
         # plans x horizon constant instead of hard-coding a count (retiming took
         # the horizon 599 -> 832 and OOM'd a fixed 4096)
@@ -374,6 +402,7 @@ class FlowMatchingPolicy(PreTrainedPolicy):
                     goal[i : i + mb],
                     None if cond is None else cond[i : i + mb],
                     None if cloud is None else cloud[i : i + mb],
+                    t0,
                 )
                 for i in range(0, m, mb)
             ]
@@ -396,6 +425,7 @@ class FlowMatchingPolicy(PreTrainedPolicy):
                 assert cond is not None
                 self.latched_idx = pick
                 self.latched_cond = cond.view(-1, k, cond.shape[-1])[rows, pick]
+        self.plan, self.plan_frame = x, self.frame
         acts = x[..., sd:]  # normalized action dims
         if self.chunk_fn is not None:
             acts = self.chunk_fn(acts)

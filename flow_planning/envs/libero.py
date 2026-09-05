@@ -329,6 +329,7 @@ class LiberoEnv:
             a for n, a in sorted(joints) if not n.startswith(("robot0", "gripper0"))
         ]
         self.max_frames = MAX_STEPS[cfg.suite]
+        self.STAGES = [f"goals{k}" for k in range(len(self.goals()) + 1)]
         self.episode_frames = self.max_frames
         self.episode_idx = 0
         self.reset()
@@ -413,10 +414,10 @@ class LiberoEnv:
             for k, n in enumerate(self.objects):
                 parts += [o[f"{n}_pos"], r6[k + 1]]
             parts.append(e.sim.data.qpos[self.fixture_qpos])
-            if self.cfg.target_obs:
-                parts.append(self.target_pos(i))
             if self.cfg.task_onehot:
                 parts.append(np.eye(self.cfg.task_onehot)[self.cfg.task_id])
+            if self.cfg.target_obs:
+                parts.append(self.target_pos(i))
             rows.append(np.concatenate(parts))
         return np.stack(rows).astype(np.float32)
 
@@ -463,6 +464,14 @@ class LiberoEnv:
     def contact_labels(self):
         return np.array(self.contact, dtype=object)
 
+    def stage(self):
+        return np.array(
+            [
+                sum(bool(e.env._eval_predicate(g)) for g in self.goals())
+                for e in self.envs
+            ]
+        )
+
     def goals(self):
         return [g for g in self.envs[0].env.parsed_problem["goal_state"] if len(g) == 3]
 
@@ -488,7 +497,9 @@ class LiberoEnv:
         )
 
     def target_slice(self):
-        start = 18 + 9 * len(self.objects) + len(self.fixture_qpos)
+        start = (
+            18 + 9 * len(self.objects) + len(self.fixture_qpos) + self.cfg.task_onehot
+        )
         return slice(start, start + 3)
 
     def held_radius(self, margin=0.01):

@@ -3,7 +3,7 @@
 import math
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal, cast
 
@@ -157,12 +157,17 @@ def main(cfg: Config):
     }
     input_features = {k: v for k, v in features.items() if k not in output_features}
 
+    goal_state_start = cfg.env.goal_state_start
+    if goal_state_start < 0:
+        probe = make_env(replace(cfg.env, world_count=1, obstacle=False), None)
+        goal_state_start = probe.held_slot()
+        print(f"goal_state_start from the held object: {goal_state_start}")
     policy_cfg = FlowMatchingConfig(
         input_features=input_features,
         output_features=output_features,
         device=device,
         goal_dim=cfg.env.goal_dim,
-        goal_state_start=cfg.env.goal_state_start,
+        goal_state_start=goal_state_start,
         n_action_steps=cfg.env.n_action_steps,
         cond_dim=cfg.cond_dim
         if cfg.cond_dim >= 0

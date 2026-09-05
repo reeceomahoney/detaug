@@ -14,6 +14,7 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 from tqdm import tqdm
 
 from flow_planning.bend import LABEL_DIM
+from flow_planning.cape import CapeGuidance
 from flow_planning.cbf import EllipsoidCBF
 from flow_planning.envs import EnvConfig, FrankaConfig, make_env
 from flow_planning.envs.franka import subsample_cloud
@@ -76,6 +77,14 @@ class Config:
     cbf_axes: str = ""  # hand ellipsoid semi-axes "x,y,z" (default paper values)
     cbf_arm: str = ""  # comma-separated fr3 link indices to add to the barrier
     cbf_offset: str = ""  # hand ellipsoid centre offset in the TCP frame "x,y,z"
+    cape: bool = False  # CAPE: EE-sphere SDF guidance + prior-seeded refinement
+    cape_scale: float = 3.0  # guidance strength lambda
+    cape_prefix: int = 2  # executed steps per refinement (overrides n_action_steps)
+    cape_delta: float = 0.08  # re-noise the shifted plan to 1-delta; 1 = no prior
+    cape_chi: float = 0.8  # guidance applies from this flow time on
+    cape_stretch: bool = True  # paper: re-time the remainder; False: hold the tail
+    cape_radius: float = 0.08  # EE sphere radius
+    cape_margin: float = 0.02  # safety margin epsilon (paper 0.06)
 
 
 def sample_cond(bend: np.ndarray, k: int, rng, device) -> torch.Tensor:
@@ -109,6 +118,8 @@ def main(cfg: Config):
     policy.config.device = device
     if cfg.n_action_steps > 0:
         policy.config.n_action_steps = cfg.n_action_steps
+    if cfg.cape:
+        policy.config.n_action_steps = cfg.cape_prefix
     if cfg.num_inference_steps > 0:
         policy.config.num_inference_steps = cfg.num_inference_steps
     policy.ensemble, policy.ensemble_m = cfg.ensemble, cfg.ensemble_m
@@ -250,6 +261,27 @@ def main(cfg: Config):
 
             policy.chunk_fn = project
 
+    cape = None
+    if cfg.cape:
+        assert cfg.env.obstacle and hasattr(env, "obstacle_boxes")
+        cape = CapeGuidance(
+            device,
+            env.robot_base_pos,
+            stats[ACTION],
+            stats[OBS_STATE],
+            policy.state_dim,
+            cfg.cape_radius,
+            cfg.cape_margin,
+        )
+        policy.guidance, policy.guide_scale = cape.grad, cfg.cape_scale
+        policy.guide_from, policy.prior_delta = cfg.cape_chi, cfg.cape_delta
+        policy.prior_stretch = cfg.cape_stretch
+        print(
+            f"cape: scale {cfg.cape_scale} delta {cfg.cape_delta} chi {cfg.cape_chi} "
+            f"keep-out {cfg.cape_radius + cfg.cape_margin:.2f} m, "
+            f"prefix {policy.config.n_action_steps}"
+        )
+
     arm = hasattr(env, "ee_state_index")  # franka: planned path needs EE FK
     if arm:
         chain = build_franka_chain(device)[0]
@@ -282,6 +314,8 @@ def main(cfg: Config):
             policy.cloud = torch.as_tensor(cloud, device=device)
         if sel is not None and hasattr(env, "obstacle_boxes"):
             sel.set_boxes(env.obstacle_boxes())
+        if cape is not None:
+            cape.set_boxes(env.obstacle_boxes())
         if cbf is not None:
             if cfg.cbf_geoms:
                 cbf.set_boxes(env.obstacle_own_boxes())
