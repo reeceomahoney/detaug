@@ -206,6 +206,14 @@ def shift_path(T, segs, m, dbs, dps):
     return np.stack([np.interp(t, k, v[:, j]) for j in range(3)], axis=1)
 
 
+def object_shift(base_shift, c, o):
+    s = base_shift.copy()
+    o = min(o, len(s) - 1)
+    s[:c] = base_shift[c]
+    s[o:] = base_shift[o]
+    return s
+
+
 def bulge_delta(ee, s0, s1, phi, theta):
     d = bend_delta(ee, s0, s1, phi, theta)
     if d.any():
@@ -329,6 +337,9 @@ def build(x, combo, m):
         combo=combo,
         ee_t=ee + base_shift,
         quat=quat,
-        objs=[o + base_shift if o is not None else None for o in objs],
+        objs=[
+            o + object_shift(base_shift, *segs[k]) if o is not None else None
+            for k, o in enumerate(objs)
+        ],
         expected=expected,
     )

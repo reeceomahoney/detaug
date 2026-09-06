@@ -154,6 +154,22 @@ def replay_libero(env, state0, act, hold, shift=None):
     return bool(env.succ[0]), np.stack(obs)
 
 
+def place_target_shifts(env, name, target_obs):
+    tgt = {g[1]: g[2] for g in env.goals()}.get(name, "")
+    if target_obs and tgt.startswith(env.target_name()):
+        return True
+    mj = env.envs[0].sim.model._model
+    return any(
+        tgt.startswith(n) and mj.body(f"{n}_main").jntadr[0] >= 0 for n in env.objects
+    )
+
+
+def place_deltas(x, dplace):
+    if dplace is None:
+        return [np.zeros(3)] * len(x["segs"])
+    return [dplace if mv else np.zeros(3) for mv in x["place_mv"]]
+
+
 def libero_demos(cfg, env, chain, base, limit):
     import h5py
     from huggingface_hub import hf_hub_download
@@ -197,6 +213,11 @@ def libero_demos(cfg, env, chain, base, limit):
         except KeyError:
             table_z = float((boxes[:, 2] - boxes[:, 5]).min())
         half = [boxes[j, 3:5] if j is not None else np.ones(2) for j in held]
+        place_mv = [
+            j is not None
+            and place_target_shifts(env, env.objects[j], cfg.env.target_obs)
+            for j in held
+        ]
         demos.append(
             dict(
                 key=k,
@@ -208,6 +229,7 @@ def libero_demos(cfg, env, chain, base, limit):
                 ee=ee,
                 quat=quat,
                 half=half,
+                place_mv=place_mv,
                 boxes=boxes,
                 fixed=fixed,
                 table_z=table_z,
@@ -258,10 +280,8 @@ def libero_candidates(cfg, demos, rng, per_demo):
                     r = cfg.retarget_place
                     dplace = np.append(rng.uniform(-r, r, 2), 0.0) if r else None
                     dbs = [np.zeros(3)] * len(x["segs"])
-                    dps = [np.zeros(3)] * len(x["segs"])
+                    dps = place_deltas(x, dplace)
                     dbs[pick] = delta
-                    if dplace is not None:
-                        dps[pick] = dplace
                     xd = dict(x) | {"dbs": dbs, "dps": dps}
                     shift = (pick, delta, dplace)
                     if rng.random() < cfg.retarget_only:
@@ -328,10 +348,8 @@ def demogen_candidates(cfg, demos, rng, per_demo):
             r = cfg.retarget_place
             dplace = np.append(rng.uniform(-r, r, 2), 0.0) if r else None
             dbs = [np.zeros(3)] * len(x["segs"])
-            dps = [np.zeros(3)] * len(x["segs"])
+            dps = place_deltas(x, dplace)
             dbs[pick] = delta
-            if dplace is not None:
-                dps[pick] = dplace
             c = build(
                 dict(x) | {"dbs": dbs, "dps": dps},
                 tuple(SEG_ZERO for _ in x["held"]),
