@@ -61,23 +61,22 @@ pixi run rollout    # configs/rollout.yaml
 
 Live obstacle tracking from two RealSense cameras (overhead and wrist) with
 SAM2, fused into a box in the Piper base frame and shown on a dashboard at
-`http://<host>:8080`. Everything lives in `hardware/obstacle_perception/` and
-runs with `pixi run python hardware/obstacle_perception/<file>`.
+`http://<host>:8080`. Everything lives in `flow_planning/perception/` and runs
+with `pixi run python -m flow_planning.perception.<module>`.
 
 ```bash
-pixi run python hardware/obstacle_perception/track_obstacle.py
+pixi run python -m flow_planning.perception.track_obstacle
 ```
 
-Calibration files are loaded from `hardware/obstacle_perception/calibration/`
-(not committed). Regenerate them when the setup changes:
+Calibration files are loaded from `outputs/perception/`. Regenerate them when
+the setup changes:
 
-- `select_top_roi.py`: overhead-camera crop. Rerun if the working view changes.
-- `calibrate_cameras.py`: wrist camera relative to the overhead camera. Rerun if
+- `select_top_roi`: overhead-camera crop. Rerun if the working view changes.
+- `calibrate_cameras`: wrist camera relative to the overhead camera. Rerun if
   either camera moves.
-- `calibrate_robot_frame.py`: overhead camera relative to the Piper base. Rerun
-  if the camera-to-robot geometry changes.
-- `track_obstacle.py --select-targets`: object references that initialise
-  tracking. Rerun when changing the tracked object.
+- `calibrate_robot_frame`: overhead camera relative to the Piper base. Rerun if
+  the camera-to-robot geometry changes.
+- `track_obstacle --select-targets`: object references that initialise tracking.
+  Rerun when changing the tracked object.
 
-Camera serials and the SAM2 model id are in
-`hardware/obstacle_perception/rig.py`.
+Camera serials and the SAM2 model id are in `flow_planning/perception/rig.py`.

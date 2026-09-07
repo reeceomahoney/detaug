@@ -13,24 +13,22 @@ from typing import Any, cast
 
 import cv2
 import numpy as np
-from camera_web import LiveState, start_dashboard
-from point_cloud_stream import (
+
+from .camera_web import LiveState, start_dashboard
+from .point_cloud_stream import (
     PointCloudStream,
     draw_gripper_marker,
     draw_projected_camera_box,
     draw_projected_policy_trajectories,
 )
-from policy_trajectory_stream import DemoTrajectoryStream
-from rig import LEFT_CAMERA_SERIAL, MODEL_ID, TOP_CAMERA_SERIAL
-from select_top_roi import CropRegion, load_region
+from .policy_trajectory_stream import DemoTrajectoryStream
+from .rig import CALIBRATION_DIR, LEFT_CAMERA_SERIAL, MODEL_ID, TOP_CAMERA_SERIAL
+from .select_top_roi import CropRegion, load_region
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-TARGET_DIR = SCRIPT_DIR / "calibration" / "targets"
-CAMERA_CALIBRATION_PATH = SCRIPT_DIR / "calibration" / "top_from_left.json"
-ROBOT_CALIBRATION_PATH = SCRIPT_DIR / "calibration" / "base_from_top.json"
-TOP_ROI_PATH = SCRIPT_DIR / "calibration" / "top_roi.json"
-LEGACY_TARGET_DIR = SCRIPT_DIR / "runs" / "tracking_targets"
-LEGACY_PUBLISH_DIR = Path("/dev/shm/flow_obstacle_tracking")
+TARGET_DIR = CALIBRATION_DIR / "targets"
+CAMERA_CALIBRATION_PATH = CALIBRATION_DIR / "top_from_left.json"
+ROBOT_CALIBRATION_PATH = CALIBRATION_DIR / "base_from_top.json"
+TOP_ROI_PATH = CALIBRATION_DIR / "top_roi.json"
 
 
 def parse_point(raw: str) -> tuple[float, float]:
@@ -504,29 +502,6 @@ def save_target(
     )
 
 
-def persist_loaded_target(
-    target_dir: Path, name: str, target: dict[str, object]
-) -> None:
-    mask = target["mask"]
-    prompt = cast(tuple[float, float], target["prompt"])
-    reference = target["reference"]
-    assert isinstance(mask, np.ndarray)
-    assert isinstance(reference, np.ndarray)
-    output = io.BytesIO()
-    np.savez_compressed(
-        output,
-        mask=mask,
-        prompt_xy=np.asarray(prompt, np.float32),
-        reference=reference,
-    )
-    target_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write(target_dir / f"{name}.npz", output.getvalue())
-    atomic_write(
-        target_dir / f"{name}_reference.png",
-        encode_image(".png", reference),
-    )
-
-
 def load_target(path: Path) -> dict[str, object]:
     with np.load(path) as target:
         mask = target["mask"].astype(bool)
@@ -541,35 +516,13 @@ def load_target(path: Path) -> dict[str, object]:
     }
 
 
-def migrate_published_target(target_dir: Path, name: str) -> bool:
-    source = LEGACY_PUBLISH_DIR / f"{name}_latest.npz"
-    if not source.exists():
-        return False
-    with np.load(source) as latest:
-        mask = latest["mask"].astype(bool)
-        prompt_values = latest["prompt_xy"].astype(float).tolist()
-        rgb = latest["rgb"].copy()
-    if not mask.any() or len(prompt_values) != 2:
-        return False
-    image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    prompt = (float(prompt_values[0]), float(prompt_values[1]))
-    save_target(target_dir, name, prompt, image, mask)
-    return True
-
-
 def load_targets(args: argparse.Namespace) -> dict[str, dict[str, object]]:
     targets = {}
     for name in ("top", "left"):
         path = args.target_dir / f"{name}.npz"
         if not path.exists():
-            legacy = LEGACY_TARGET_DIR / f"{name}.npz"
-            if legacy.exists():
-                persist_loaded_target(args.target_dir, name, load_target(legacy))
-            else:
-                migrate_published_target(args.target_dir, name)
-        if not path.exists():
             raise RuntimeError(
-                "No saved obstacle targets. Run select_obstacle.sh once first."
+                "No saved obstacle targets. Run track_obstacle --select-targets first."
             )
         targets[name] = load_target(path)
     return targets
@@ -829,7 +782,7 @@ def select_targets(
     board.set_phase("Targets saved")
     board.publish()
     print(f"Saved top and left targets in {args.target_dir}")
-    print("Run track_obstacle.sh to start tracking")
+    print("Run track_obstacle to start tracking")
 
 
 def align_trackers(

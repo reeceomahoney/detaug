@@ -10,6 +10,7 @@ import numpy as np
 TOP_CAMERA_SERIAL = "323622271046"
 LEFT_CAMERA_SERIAL = "335122272969"
 MODEL_ID = "facebook/sam2.1-hiera-small"
+CALIBRATION_DIR = Path(__file__).resolve().parents[2] / "outputs" / "perception"
 
 
 def transform_from_rpy(rpy: np.ndarray, translation: np.ndarray) -> np.ndarray:

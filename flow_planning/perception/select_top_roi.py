@@ -12,9 +12,10 @@ from typing import Any
 
 import cv2
 import numpy as np
-from rig import TOP_CAMERA_SERIAL
 
-OUTPUT_PATH = Path(__file__).resolve().parent / "calibration" / "top_roi.json"
+from .rig import CALIBRATION_DIR, TOP_CAMERA_SERIAL
+
+OUTPUT_PATH = CALIBRATION_DIR / "top_roi.json"
 
 
 @dataclass(frozen=True)
@@ -187,7 +188,7 @@ def capture_region(args: argparse.Namespace) -> CropRegion:
         pipeline.start(config)
     except Exception as error:
         raise RuntimeError(
-            "Could not open the top camera. Stop track_obstacle.sh first. "
+            "Could not open the top camera. Stop track_obstacle first. "
             f"Camera error: {error}"
         ) from error
     center = [args.source_width // 2, args.source_height // 2]

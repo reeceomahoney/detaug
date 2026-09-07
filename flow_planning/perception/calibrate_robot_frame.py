@@ -13,7 +13,8 @@ from typing import Any
 
 import cv2
 import numpy as np
-from calibrate_cameras import (
+
+from .calibrate_cameras import (
     BoardObservation,
     average_transforms,
     intrinsics_dict,
@@ -24,13 +25,14 @@ from calibrate_cameras import (
     start_camera,
     transform_from_pose,
 )
-from rig import (
+from .rig import (
+    CALIBRATION_DIR,
     TOP_CAMERA_SERIAL,
     PiperPoseReader,
     transform_points,
 )
 
-OUTPUT_PATH = Path(__file__).resolve().parent / "calibration" / "base_from_top.json"
+OUTPUT_PATH = CALIBRATION_DIR / "base_from_top.json"
 
 
 @dataclass
@@ -1140,7 +1142,7 @@ def run_calibration(args: argparse.Namespace) -> None:
     except Exception as error:
         if pipeline is None:
             raise RuntimeError(
-                "Could not open the top camera. Stop track_obstacle.sh before "
+                "Could not open the top camera. Stop track_obstacle before "
                 f"calibration. Camera error: {error}"
             ) from error
         raise

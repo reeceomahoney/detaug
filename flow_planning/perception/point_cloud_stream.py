@@ -8,8 +8,9 @@ from typing import Any, cast
 
 import cv2
 import numpy as np
-from camera_web import LiveState
-from rig import PiperPoseReader, transform_points
+
+from .camera_web import LiveState
+from .rig import PiperPoseReader, transform_points
 
 
 @dataclass

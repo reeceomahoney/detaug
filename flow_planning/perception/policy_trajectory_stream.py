@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from camera_web import LiveState, Trajectory3D
+
+from .camera_web import LiveState, Trajectory3D
 
 DATASET_ID = "reece-omahoney/pick-and-place"
 DATASET_FILE = "data/chunk-000/file-000.parquet"

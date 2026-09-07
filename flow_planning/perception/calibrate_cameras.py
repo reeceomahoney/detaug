@@ -14,9 +14,10 @@ from typing import Any
 
 import cv2
 import numpy as np
-from rig import LEFT_CAMERA_SERIAL, TOP_CAMERA_SERIAL
 
-OUTPUT_PATH = Path(__file__).resolve().parent / "calibration" / "top_from_left.json"
+from .rig import CALIBRATION_DIR, LEFT_CAMERA_SERIAL, TOP_CAMERA_SERIAL
+
+OUTPUT_PATH = CALIBRATION_DIR / "top_from_left.json"
 
 
 @dataclass
@@ -565,7 +566,7 @@ def capture_samples(args: argparse.Namespace, board) -> tuple[list[PosePair], An
         if top_pipeline is not None:
             top_pipeline.stop()
         raise RuntimeError(
-            "Could not open both cameras. Stop track_obstacle.sh before calibration. "
+            "Could not open both cameras. Stop track_obstacle before calibration. "
             f"Camera error: {error}"
         ) from error
     top_matrix, top_distortion = intrinsics_values(top_intrinsics)
