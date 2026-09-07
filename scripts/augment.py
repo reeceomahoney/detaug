@@ -306,14 +306,21 @@ WALL_K = 40
 
 
 def harvest_obstacles(cfg, task_ids):
-    from flow_planning.envs.libero import LiberoEnv, obstacle_geom_boxes
+    from flow_planning.envs.libero import (
+        LiberoEnv,
+        libero_setup,
+        obstacle_geom_boxes,
+        task_files,
+    )
 
+    root = libero_setup()
     lib = []
     for t in task_ids:
         for lvl in ("I", "II"):
-            env = LiberoEnv(
-                replace(cfg.env, task_id=t, level=lvl, world_count=1, obstacle=True)
-            )
+            ecfg = replace(cfg.env, task_id=t, level=lvl, world_count=1, obstacle=True)
+            if not task_files(ecfg, root)[1].exists():
+                continue
+            env = LiberoEnv(ecfg)
             for _ in range(cfg.obstacle_inits):
                 env.reset()
                 name = env.obstacle[0]
