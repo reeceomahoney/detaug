@@ -39,6 +39,9 @@ class DetAugConfig:
     deviation: float = 0.0  # penalise action distance from the zero-label plan
     resample: bool = False  # fresh candidates every replan instead of latching
     wait: float = 10.0  # seconds to wait for the first obstacle before starting
+    freeze: float = 1.5  # seconds to average the box over at start; 0 = track live
+    max_half: float = 0.15  # reject a box whose footprint half-extent exceeds this
+    max_spread: float = 0.02  # reject a freeze window whose centre moves more
     seed: int = 0
     dump: str = ""  # non-empty: write per-replan plans and executed actions here
 
@@ -74,6 +77,40 @@ def sample_bends(n: int, stats, rng, device, lo: float, hi: float) -> torch.Tens
     assert len(keep) >= n, "bend stats leave no room to sample candidates"
     bends = np.concatenate([np.zeros((1, 2)), keep[:n]])
     return torch.tensor(bends, dtype=torch.float32, device=device)
+
+
+def freeze_box(client, seconds: float) -> tuple[np.ndarray, float, int]:
+    """Average the published box over a window and report how far its centre
+    wandered. A static obstacle needs no tracking, and a tracker that loses the
+    target reports a confident box somewhere else -- scoring against that is
+    indistinguishable from a clear scene, so freeze once and check the spread."""
+    seen: dict[float, np.ndarray] = {}
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        payload = client.latest()
+        if payload is not None and payload.get("box") is not None:
+            seen[float(payload.get("stamp", 0.0))] = np.asarray(
+                payload["box"], np.float32
+            )
+        time.sleep(0.02)
+    if not seen:
+        raise RuntimeError("no obstacle published during the freeze window")
+    boxes = np.stack(list(seen.values()))
+    centres = boxes[:, :3]
+    spread = float(np.linalg.norm(centres - centres.mean(0), axis=1).max())
+    return boxes.mean(0), spread, len(boxes)
+
+
+def check_box(box: np.ndarray, max_half: float) -> None:
+    half = box[3:]
+    if float(half[:2].max()) > max_half:
+        raise RuntimeError(
+            f"obstacle footprint {2 * half[0]:.3f} x {2 * half[1]:.3f} m exceeds "
+            f"{2 * max_half:.3f} m -- the tracker is probably masking the table, "
+            "re-select the target with: pixi run perception --select-targets"
+        )
+    if float(half.min()) <= 0.0:
+        raise RuntimeError(f"degenerate obstacle box {box.round(3)}")
 
 
 def normalizer_stats(preprocessor) -> dict:
@@ -122,7 +159,29 @@ def attach_selector(ctx, cfg: DetAugConfig):
             "pipeline first: pixi run python -m detaug.perception.track_obstacle"
         )
 
+    frozen: np.ndarray | None = None
+    if cfg.freeze > 0 and cfg.collision != "pointcloud":
+        frozen, spread, n = freeze_box(client, cfg.freeze)
+        check_box(frozen, cfg.max_half)
+        logger.info(
+            "froze the obstacle over %.1fs: %d samples, centre spread %.3f m",
+            cfg.freeze,
+            n,
+            spread,
+        )
+        if spread > cfg.max_spread:
+            raise RuntimeError(
+                f"obstacle centre moved {spread:.3f} m during the freeze window "
+                f"(limit {cfg.max_spread:.3f}); the tracker is not holding the "
+                "target, check the dashboard before running the arm"
+            )
+        frozen = frozen.copy()
+        frozen[3:] += cfg.margin
+        sel.set_boxes(frozen)
+
     def refresh() -> bool:
+        if frozen is not None:
+            return True
         if cfg.collision == "pointcloud":
             cloud = client.cloud()
             sel.set_cloud(cloud)
@@ -222,9 +281,14 @@ def attach_selector(ctx, cfg: DetAugConfig):
         if torch.is_tensor(policy.cond_candidates)
         else "resampled each replan",
     )
-    box = client.box()
+    box = frozen if frozen is not None else client.box()
     if box is not None:
-        logger.info("obstacle box (base frame): %s", box.round(3))
+        logger.info(
+            "obstacle box (base frame, %s): centre %s half %s",
+            "frozen" if frozen is not None else "live",
+            box[:3].round(3),
+            box[3:].round(3),
+        )
 
     def save():
         if not cfg.dump or not trace["costs"]:

@@ -30,6 +30,7 @@ detaug:
   hold: 0.0
   deviation: 0.0
   resample: true
+  freeze: 1.5
   dump: outputs/rollout
 
 
