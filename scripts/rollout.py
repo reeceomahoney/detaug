@@ -1,5 +1,7 @@
 import logging
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Event
 from typing import cast
 
@@ -38,6 +40,7 @@ class DetAugConfig:
     resample: bool = False  # fresh candidates every replan instead of latching
     wait: float = 10.0  # seconds to wait for the first obstacle before starting
     seed: int = 0
+    dump: str = ""  # non-empty: write per-replan plans and executed actions here
 
 
 @dataclass
@@ -132,15 +135,37 @@ def attach_selector(ctx, cfg: DetAugConfig):
         sel.set_boxes(box)
         return True
 
+    drawn: dict[str, torch.Tensor] = {}
+
     def draw():
-        return sample_bends(
+        c = sample_bends(
             cfg.n_cond, stats["bend"], rng, device, cfg.bend_min, cfg.bend_max
         )
+        drawn["c"] = c
+        return c
+
+    # the plan the selector scored and the motion the arm actually ran are the
+    # two things the logs cannot tell apart, so record both
+    trace: dict[str, list] = {
+        "box": [],
+        "labels": [],
+        "costs": [],
+        "chosen": [],
+        "fresh": [],
+        "plan": [],
+        "obs": [],
+        "act": [],
+        "step_time": [],
+    }
 
     def score(traj):
         fresh = refresh()
         s = sel.score(traj)
         v = s.detach().cpu().numpy()
+        trace["box"].append(sel.box.reshape(-1, 6)[0].cpu().numpy())
+        trace["labels"].append(drawn["c"].cpu().numpy())
+        trace["costs"].append(v)
+        trace["fresh"].append(fresh)
         # replicate the policy's latch so the log names the plan that actually
         # runs; the global argmin is not it once a candidate has been latched
         latched = policy.latched_idx
@@ -165,6 +190,21 @@ def attach_selector(ctx, cfg: DetAugConfig):
     policy.deviation = cfg.deviation
     policy.cond_candidates = draw if cfg.resample else draw()
 
+    inner = policy.select_action
+
+    def select_action(batch, **kwargs):
+        action = inner(batch, **kwargs)
+        if len(trace["costs"]) > len(trace["plan"]):  # a replan just landed
+            trace["plan"].append(policy.plan[0].cpu().numpy())
+            idx = policy.latched_idx
+            trace["chosen"].append(-1 if idx is None else int(idx[0]))
+        trace["obs"].append(batch[OBS_STATE].detach().cpu().numpy().reshape(-1))
+        trace["act"].append(action.detach().cpu().numpy().reshape(-1))
+        trace["step_time"].append(time.time())
+        return action
+
+    policy.select_action = select_action
+
     refresh()
     logger.info(
         "detaug: %d bend candidates + zero, %s geometry, radius %.3f margin %.3f",
@@ -185,7 +225,37 @@ def attach_selector(ctx, cfg: DetAugConfig):
     box = client.box()
     if box is not None:
         logger.info("obstacle box (base frame): %s", box.round(3))
-    return client
+
+    def save():
+        if not cfg.dump or not trace["costs"]:
+            return
+        path = Path(cfg.dump)
+        if path.is_dir() or not path.suffix:
+            path = path / f"rollout-{time.strftime('%Y%m%d-%H%M%S')}.npz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        n = min(len(trace["costs"]), len(trace["plan"]))
+        out = {
+            "box": np.stack(trace["box"][:n]),
+            "labels": np.stack(trace["labels"][:n]),
+            "costs": np.stack(trace["costs"][:n]),
+            "chosen": np.asarray(trace["chosen"][:n]),
+            "fresh": np.asarray(trace["fresh"][:n]),
+            "plan": np.stack(trace["plan"][:n]),
+            "obs": np.stack(trace["obs"]),
+            "act": np.stack(trace["act"]),
+            "step_time": np.asarray(trace["step_time"]),
+            "n_action_steps": np.asarray(policy.config.n_action_steps),
+            "state_dim": np.asarray(policy.state_dim),
+            "radius": np.asarray(cfg.radius),
+            "margin": np.asarray(cfg.margin),
+        }
+        for key in (OBS_STATE, ACTION):
+            for stat in ("mean", "std"):
+                out[f"{key}.{stat}"] = stats[key][stat]
+        np.savez_compressed(path, **out)  # ty: ignore[invalid-argument-type]
+        logger.info("wrote %s (%d replans, %d steps)", path, n, len(trace["act"]))
+
+    return client, save
 
 
 @parser.wrap()
@@ -205,10 +275,10 @@ def rollout(cfg: DetAugRolloutConfig):
     ctx = build_rollout_context(cfg, shutdown_event)
     strategy = create_strategy(cfg.strategy)
 
-    client = None
+    client = save = None
     try:
         if cfg.detaug.obstacle_url:
-            client = attach_selector(ctx, cfg.detaug)
+            client, save = attach_selector(ctx, cfg.detaug)
         strategy.setup(ctx)
         strategy.run(ctx)
     except KeyboardInterrupt:
@@ -216,6 +286,8 @@ def rollout(cfg: DetAugRolloutConfig):
     finally:
         if client is not None:
             client.stop()
+        if save is not None:
+            save()
         strategy.teardown(ctx)
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
