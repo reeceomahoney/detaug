@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Obstacle perception</title>
+<link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+<header>
+  <div><h1>Obstacle perception</h1>
+    <p class="subtitle">Tracking workspace · dual RGB-D views</p></div>
+  <div class="header-actions">
+    <div class="header-filter"><label for="outlier-trim">Outlier trim</label>
+      <input id="outlier-trim" type="range" min="0" max="50"
+        step="1" value="40">
+      <output id="outlier-value">40%</output></div>
+    <button class="recalibrate" id="recalibrate">Recalibrate</button>
+    <div class="overall"><span class="dot" id="overall-dot"></span>
+      <span id="overall-text">Waiting for tracker</span></div>
+  </div>
+</header>
+
+<main class="workspace">
+  <section class="stage">
+    <article class="tile">
+      <div class="tile-head"><span class="tile-title">Top tracking view</span>
+        <span class="tile-tag" id="top-metrics">Waiting</span></div>
+      <img class="overlay live-image" data-file="top_overlay.jpg">
+    </article>
+    <article class="tile">
+      <div class="tile-head"><span class="tile-title">Left wrist tracking view</span>
+        <span class="tile-tag" id="left-metrics">Waiting</span></div>
+      <img class="overlay live-image" data-file="left_overlay.jpg">
+    </article>
+    <article class="tile">
+      <div class="tile-head"><span class="tile-title">Merged cloud · top POV</span>
+        <span class="tile-tag">Fixed camera projection</span></div>
+      <div class="cloud-wrap"><img class="cloud-stream live-image"
+        data-file="top_cloud.jpg"></div>
+    </article>
+    <article class="tile">
+      <div class="tile-head"><span class="tile-title">Merged cloud · left POV</span>
+        <span class="tile-tag">Fixed camera projection</span></div>
+      <div class="cloud-wrap"><img class="cloud-stream live-image"
+        data-file="left_cloud.jpg"></div>
+    </article>
+    <article class="tile">
+      <div class="tile-head"><span class="tile-title">
+        Shared 3D scene · right robot base</span>
+        <span class="tile-tag">Oblique projection</span></div>
+      <div class="cloud-wrap"><img class="cloud-stream live-image"
+        data-file="scene_cloud.jpg"></div>
+    </article>
+    <article class="tile">
+      <div class="tile-head"><span class="tile-title">Perception overview</span>
+        <span class="tile-tag">Raw · target · mask</span></div>
+      <div class="overview-body">
+        <div class="diagnostic"><div class="diagnostic-label">Top raw</div>
+          <img class="diagnostic-image live-image" data-file="top_raw.jpg"></div>
+        <div class="diagnostic checker">
+          <div class="diagnostic-label">Top target</div>
+          <img class="diagnostic-image target-image"
+            data-file="top_reference.png"></div>
+        <div class="diagnostic"><div class="diagnostic-label">Top mask</div>
+          <img class="diagnostic-image live-image" data-file="top_mask.png"></div>
+        <div class="diagnostic"><div class="diagnostic-label">Left raw</div>
+          <img class="diagnostic-image live-image" data-file="left_raw.jpg"></div>
+        <div class="diagnostic checker">
+          <div class="diagnostic-label">Left target</div>
+          <img class="diagnostic-image target-image"
+            data-file="left_reference.png"></div>
+        <div class="diagnostic"><div class="diagnostic-label">Left mask</div>
+          <img class="diagnostic-image live-image" data-file="left_mask.png"></div>
+      </div>
+    </article>
+  </section>
+</main>
+
+<script src="/dashboard.js" defer></script>
+</body>
+</html>
