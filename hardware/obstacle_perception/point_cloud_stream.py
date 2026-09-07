@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import threading
 from dataclasses import dataclass
@@ -10,6 +9,7 @@ from typing import Any, cast
 import cv2
 import numpy as np
 from camera_web import LiveState
+from rig import PiperPoseReader, transform_points
 
 
 @dataclass
@@ -123,97 +123,6 @@ def load_robot_calibration(
     return transform.astype(np.float32), label, str(payload.get("can_interface"))
 
 
-def transform_from_rpy(rpy: np.ndarray, translation: np.ndarray) -> np.ndarray:
-    roll, pitch, yaw = rpy
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    rotation_x = np.asarray(
-        [[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]],
-        dtype=np.float64,
-    )
-    rotation_y = np.asarray(
-        [[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]],
-        dtype=np.float64,
-    )
-    rotation_z = np.asarray(
-        [[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-    transform = np.eye(4, dtype=np.float64)
-    transform[:3, :3] = rotation_z @ rotation_y @ rotation_x
-    transform[:3, 3] = translation
-    return transform
-
-
-def import_piper_sdk() -> Any:
-    return importlib.import_module("piper_sdk")
-
-
-class PiperPoseReader:
-    def __init__(self, can_interface: str):
-        self.can_interface = can_interface
-        self.interface: Any = None
-        self.error: str | None = None
-
-    def connect(self) -> None:
-        try:
-            if not (Path("/sys/class/net") / self.can_interface).exists():
-                raise RuntimeError(f"{self.can_interface} is unavailable")
-            module = import_piper_sdk()
-            self.interface = module.C_PiperInterface_V2(self.can_interface)
-            self.interface.ConnectPort(piper_init=False)
-            self.error = None
-        except Exception as error:
-            self.interface = None
-            self.error = str(error)
-
-    def read(self) -> np.ndarray | None:
-        if self.interface is None:
-            return None
-        message = self.interface.GetArmEndPoseMsgs()
-        if float(message.time_stamp) <= 0.0 or float(message.Hz) <= 0.0:
-            return None
-        pose = message.end_pose
-        translation = (
-            np.asarray(
-                [pose.X_axis, pose.Y_axis, pose.Z_axis],
-                dtype=np.float64,
-            )
-            / 1_000_000.0
-        )
-        rpy = np.radians(
-            np.asarray(
-                [pose.RX_axis, pose.RY_axis, pose.RZ_axis],
-                dtype=np.float64,
-            )
-            / 1000.0
-        )
-        return transform_from_rpy(rpy, translation).astype(np.float32)
-
-    def read_state(self) -> tuple[float, ...] | None:
-        if self.interface is None:
-            return None
-        joint_message = self.interface.GetArmJointMsgs()
-        gripper_message = self.interface.GetArmGripperMsgs()
-        if (
-            float(joint_message.time_stamp) <= 0.0
-            or float(gripper_message.time_stamp) <= 0.0
-        ):
-            return None
-        joints = joint_message.joint_state
-        state = [
-            float(getattr(joints, f"joint_{index}")) / 1000.0 for index in range(1, 7)
-        ]
-        state.append(float(gripper_message.gripper_state.grippers_angle) / 10000.0)
-        return tuple(state)
-
-    def disconnect(self) -> None:
-        if self.interface is not None:
-            self.interface.DisconnectPort()
-            self.interface = None
-
-
 def camera_points(
     sample: dict[str, object], max_points: int, trim_percent: float
 ) -> tuple[np.ndarray, int, int]:
@@ -284,12 +193,6 @@ def context_points(sample: dict[str, object], max_points: int) -> np.ndarray:
         / float(intrinsics["fy"])
     )
     return np.column_stack((x, y, z))
-
-
-def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    if not len(points):
-        return points.copy()
-    return points @ transform[:3, :3].T + transform[:3, 3]
 
 
 def estimate_obstacle_box(
@@ -1654,7 +1557,10 @@ class PointCloudStream:
         self.thread = threading.Thread(target=self.run, daemon=True)
 
     def start(self) -> None:
-        self.pose_reader.connect()
+        try:
+            self.pose_reader.connect()
+        except Exception as error:
+            print(f"piper: {error}")
         self.thread.start()
 
     def stop(self) -> None:

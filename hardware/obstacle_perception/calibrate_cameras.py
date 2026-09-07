@@ -14,9 +14,8 @@ from typing import Any
 
 import cv2
 import numpy as np
+from rig import LEFT_CAMERA_SERIAL, TOP_CAMERA_SERIAL
 
-TOP_CAMERA_SERIAL = "323622271046"
-LEFT_CAMERA_SERIAL = "335122272969"
 OUTPUT_PATH = Path(__file__).resolve().parent / "calibration" / "top_from_left.json"
 
 

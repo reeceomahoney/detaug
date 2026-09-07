@@ -14,16 +14,22 @@ from typing import Any
 import cv2
 import numpy as np
 from calibrate_cameras import (
+    BoardObservation,
     average_transforms,
     intrinsics_dict,
     intrinsics_values,
     next_color,
+    robust_limit,
     rotation_error_deg,
     start_camera,
     transform_from_pose,
 )
+from rig import (
+    TOP_CAMERA_SERIAL,
+    PiperPoseReader,
+    transform_points,
+)
 
-TOP_CAMERA_SERIAL = "323622271046"
 OUTPUT_PATH = Path(__file__).resolve().parent / "calibration" / "base_from_top.json"
 
 
@@ -36,13 +42,6 @@ class TagDetection:
 
 
 @dataclass
-class BoardObservation:
-    transform: np.ndarray
-    corners: list[np.ndarray]
-    ids: np.ndarray
-    reprojection_error: float
-
-
 @dataclass
 class CalibrationSample:
     base_from_flange: np.ndarray
@@ -59,68 +58,6 @@ class RobotCalibrationResult:
     translation_errors_m: np.ndarray
     rotation_errors_deg: np.ndarray
     inliers: np.ndarray
-
-
-class PiperPoseReader:
-    def __init__(self, can_interface: str):
-        self.can_interface = can_interface
-        self.interface: Any = None
-
-    def connect(self) -> None:
-        can_path = Path("/sys/class/net") / self.can_interface
-        if not can_path.exists():
-            raise RuntimeError(
-                f"CAN interface {self.can_interface} is not active. Run:\n"
-                "python ~/projects/distal/distal/hardware/can_activate.py "
-                "-p 3-1:1.0=can_arm_right"
-            )
-        if (can_path / "operstate").read_text().strip() != "up":
-            raise RuntimeError(
-                f"CAN interface {self.can_interface} is down. Run:\n"
-                "python ~/projects/distal/distal/hardware/can_activate.py "
-                "-p 3-1:1.0=can_arm_right"
-            )
-        module = import_piper_sdk()
-        self.interface = module.C_PiperInterface_V2(self.can_interface)
-        self.interface.ConnectPort(piper_init=False)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if self.read() is not None:
-                return
-            time.sleep(0.05)
-        self.disconnect()
-        raise RuntimeError(
-            f"No end-pose feedback on {self.can_interface}. "
-            "Plug in the arm and start its normal teleoperation process."
-        )
-
-    def read(self) -> np.ndarray | None:
-        if self.interface is None:
-            return None
-        message = self.interface.GetArmEndPoseMsgs()
-        if float(message.time_stamp) <= 0.0 or float(message.Hz) <= 0.0:
-            return None
-        pose = message.end_pose
-        translation = (
-            np.asarray(
-                [pose.X_axis, pose.Y_axis, pose.Z_axis],
-                dtype=np.float64,
-            )
-            / 1_000_000.0
-        )
-        rpy = np.radians(
-            np.asarray(
-                [pose.RX_axis, pose.RY_axis, pose.RZ_axis],
-                dtype=np.float64,
-            )
-            / 1000.0
-        )
-        return transform_from_rpy(rpy, translation)
-
-    def disconnect(self) -> None:
-        if self.interface is not None:
-            self.interface.DisconnectPort()
-            self.interface = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -152,10 +89,6 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def import_piper_sdk() -> Any:
-    return importlib.import_module("piper_sdk")
-
-
 def destroy_windows() -> None:
     try:
         cv2.destroyAllWindows()
@@ -178,29 +111,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("Stability duration must be positive")
     if args.can_interface is None:
         args.can_interface = f"can_arm_{args.arm}"
-
-
-def transform_from_rpy(rpy: np.ndarray, translation: np.ndarray) -> np.ndarray:
-    roll, pitch, yaw = rpy
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    rotation_x = np.asarray(
-        [[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]],
-        dtype=np.float64,
-    )
-    rotation_y = np.asarray(
-        [[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]],
-        dtype=np.float64,
-    )
-    rotation_z = np.asarray(
-        [[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]],
-        dtype=np.float64,
-    )
-    transform = np.eye(4, dtype=np.float64)
-    transform[:3, :3] = rotation_z @ rotation_y @ rotation_x
-    transform[:3, 3] = translation
-    return transform
 
 
 def marker_points(size_m: float) -> np.ndarray:
@@ -235,10 +145,6 @@ def create_detector(dictionary):
     parameters.aprilTagQuadDecimate = 1.0
     parameters.aprilTagQuadSigma = 0.0
     return cv2.aruco.ArucoDetector(dictionary, parameters)
-
-
-def transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
-    return points @ transform[:3, :3].T + transform[:3, 3]
 
 
 def reprojection_error(
@@ -751,12 +657,6 @@ def capture_samples(
             stable_window.clear()
             notice = "Removed the latest pose"
     return samples
-
-
-def robust_limit(values: np.ndarray, floor: float) -> float:
-    median = float(np.median(values))
-    deviation = float(np.median(np.abs(values - median)))
-    return max(floor, median + 3.0 * 1.4826 * deviation)
 
 
 def solve_translation_and_scale(

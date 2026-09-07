@@ -21,11 +21,9 @@ from point_cloud_stream import (
     draw_projected_policy_trajectories,
 )
 from policy_trajectory_stream import DemoTrajectoryStream
+from rig import LEFT_CAMERA_SERIAL, MODEL_ID, TOP_CAMERA_SERIAL
 from select_top_roi import CropRegion, load_region
 
-TOP_CAMERA_SERIAL = "323622271046"
-LEFT_CAMERA_SERIAL = "335122272969"
-MODEL_ID = "facebook/sam2.1-hiera-small"
 SCRIPT_DIR = Path(__file__).resolve().parent
 TARGET_DIR = SCRIPT_DIR / "calibration" / "targets"
 CAMERA_CALIBRATION_PATH = SCRIPT_DIR / "calibration" / "top_from_left.json"

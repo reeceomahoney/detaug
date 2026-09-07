@@ -10,10 +10,6 @@ The `rick` setup is already configured, so normal use only requires:
 pixi run python hardware/obstacle_perception/track_obstacle.py
 ```
 
-The first run downloads SAM2
-(`pixi run python hardware/obstacle_perception/preflight.py --download-model`
-does it up front).
-
 This loads the saved camera crop, calibrations, and obstacle references; starts
 both cameras, SAM2 tracking, point-cloud estimation, and robot-frame projection;
 and serves the dashboard at `http://rick:8080`.
@@ -47,7 +43,7 @@ policy_trajectory_stream.py   Projects recorded robot trajectories into the scen
 select_top_roi.py             Selects the working crop of the overhead camera
 calibrate_cameras.py          Calibrates the wrist camera relative to the overhead camera
 calibrate_robot_frame.py      Calibrates the overhead camera relative to the Piper base
-preflight.py                  Checks dependencies, camera access, display, and model availability
+rig.py                        Camera serials, SAM2 model id, and the Piper pose reader
 
 calibration/                  Generated calibration and target files; not committed
 runs/                         Generated runtime output; not committed
