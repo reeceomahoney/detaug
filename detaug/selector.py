@@ -9,7 +9,7 @@ import trimesh
 from pytorch_volumetric import sdf as pv_sdf
 from torch import Tensor
 
-from detaug.kinematics import build_franka_chain
+from detaug.kinematics import build_franka_chain, build_piper_chain
 
 LINKS = [f"fr3_link{i}" for i in range(8)] + ["fr3_hand"]
 FINGERS = ["fr3_leftfinger", "fr3_rightfinger"]
@@ -28,6 +28,27 @@ def box_sdf(points: Tensor, center: Tensor, half_extents) -> Tensor:
     outside = q.clamp(min=0.0).norm(dim=-1)
     inside = q.amax(dim=-1).clamp(max=0.0)
     return outside + inside
+
+
+def obstacle_dist(points: Tensor, box: Tensor, cloud: Tensor | None) -> Tensor:
+    """Distance from points (b, ..., 3) to the obstacle: signed against boxes,
+    unsigned nearest-neighbour against a cloud."""
+    if cloud is None:
+        if box.dim() == 2:
+            box = box[:, None]
+        shape = (len(box),) + (1,) * (points.dim() - 2) + (3,)
+        return torch.stack(
+            [
+                box_sdf(points, box[:, k, :3].view(shape), box[:, k, 3:].view(shape))
+                for k in range(box.shape[1])
+            ]
+        ).amin(dim=0)
+    p = points.reshape(-1, 3)
+    step = 1 << 19
+    out = [
+        torch.cdist(p[i : i + step], cloud).amin(dim=1) for i in range(0, len(p), step)
+    ]
+    return torch.cat(out).reshape(points.shape[:-1])
 
 
 def sample_mesh(mesh, n: int) -> np.ndarray:
@@ -211,25 +232,7 @@ class AnalyticSelector:
         return torch.cat(out)
 
     def dist(self, points: Tensor, box: Tensor) -> Tensor:
-        if self.cloud is None:
-            if box.dim() == 2:
-                box = box[:, None]
-            shape = (len(box),) + (1,) * (points.dim() - 2) + (3,)
-            return torch.stack(
-                [
-                    box_sdf(
-                        points, box[:, k, :3].view(shape), box[:, k, 3:].view(shape)
-                    )
-                    for k in range(box.shape[1])
-                ]
-            ).amin(dim=0)
-        p = points.reshape(-1, 3)
-        step = 1 << 19
-        out = [
-            torch.cdist(p[i : i + step], self.cloud).amin(dim=1)
-            for i in range(0, len(p), step)
-        ]
-        return torch.cat(out).reshape(points.shape[:-1])
+        return obstacle_dist(points, box, self.cloud)
 
     def joints(self, traj: Tensor) -> tuple[Tensor, Tensor]:
         s, n = self.joint_start, self.n_arm
@@ -274,3 +277,151 @@ class AnalyticSelector:
             cube = (cube[:, ::SELF_STRIDE].float() - self.fc.base_pos).reshape(-1, 3)
         pen, _ = self.fc.body_penetration(q.reshape(-1, self.n_arm).float(), cube)
         return SELF_STRIDE * pen.reshape(b, t).sum(dim=1)
+
+
+PIPER_SEGMENTS = (
+    ("base_link", "link1"),
+    ("link2", "link3"),
+    ("link3", "link4"),
+    ("link5", "link6"),
+)
+PIPER_FRAMES = ["base_link", "link1", "link2", "link3", "link4", "link5", "link6"]
+PIPER_TIP = 0.1358
+PIPER_RADIUS = 0.045
+PIPER_SEGMENT_POINTS = 8
+
+
+class PiperCollision:
+    """Capsule centrelines sampled between consecutive piper link origins. The
+    URDF's meshes are not vendored, so the link volumes are approximated by a
+    single radius about those segments. link6 is where the SDK's end pose and
+    bend.py's FK stop, but the gripper reaches PIPER_TIP past it, so the last
+    segment runs out to the fingertips."""
+
+    def __init__(
+        self,
+        device,
+        base_pos=(0.0, 0.0, 0.0),
+        radius: float = PIPER_RADIUS,
+        tip: float = PIPER_TIP,
+        n: int = PIPER_SEGMENT_POINTS,
+    ):
+        self.device = device
+        self.chain = build_piper_chain(device)
+        self.base_pos = torch.as_tensor(base_pos, dtype=torch.float32, device=device)
+        self.radius = radius
+        self.tip = tip
+        self.pairs = [
+            (PIPER_FRAMES.index(a), PIPER_FRAMES.index(b)) for a, b in PIPER_SEGMENTS
+        ]
+        self.t = torch.linspace(0.0, 1.0, n, device=device)[:, None]
+
+    def frames(self, q: Tensor) -> Tensor:
+        fk = self.chain.forward_kinematics(q, end_only=False)
+        return torch.stack([fk[name].get_matrix() for name in PIPER_FRAMES], dim=1)
+
+    def tip_point(self, mats: Tensor) -> Tensor:
+        m = mats[:, -1]
+        return m[:, :3, 3] + self.tip * m[:, :3, 2]
+
+    def arm_points(self, q: Tensor) -> Tensor:
+        """q (m, 6) radians -> (m, K, 3) collision points in the base frame."""
+        mats = self.frames(q)
+        o = mats[:, :, :3, 3]
+        ends = [(o[:, a], o[:, b]) for a, b in self.pairs]
+        ends.append((o[:, -1], self.tip_point(mats)))
+        pts = [a[:, None] + self.t * (b - a)[:, None] for a, b in ends]
+        return torch.cat(pts, dim=1) + self.base_pos
+
+    def held_point(self, q: Tensor, offset: float) -> Tensor:
+        mats = self.frames(q)
+        m = mats[:, -1]
+        return m[:, :3, 3] + (self.tip + offset) * m[:, :3, 2] + self.base_pos
+
+
+class PiperSelector:
+    """AnalyticSelector's scoring for the piper arm: the recorded joints are in
+    degrees and there is no object block in the observation, so the held item is
+    a sphere carried past the fingertips while the gripper reads closed."""
+
+    def __init__(
+        self,
+        act_stats,
+        obs_stats,
+        joint_start: int,
+        device,
+        base_pos=(0.0, 0.0, 0.0),
+        n_arm: int = 6,
+        hold: float = 0.0,
+        hold_offset: float = 0.0,
+        grip_closed: float = 1.5,
+        radius: float = PIPER_RADIUS,
+    ):
+        f32 = {"dtype": torch.float32, "device": device}
+        self.device = device
+        self.fc = PiperCollision(device, base_pos, radius=radius)
+        self.jm = torch.as_tensor(act_stats["mean"], **f32)[:n_arm]
+        self.js = torch.as_tensor(act_stats["std"], **f32)[:n_arm]
+        self.sm = torch.as_tensor(obs_stats["mean"], **f32)[:n_arm]
+        self.ss = torch.as_tensor(obs_stats["std"], **f32)[:n_arm]
+        self.gm = torch.as_tensor(act_stats["mean"], **f32)[n_arm]
+        self.gs = torch.as_tensor(act_stats["std"], **f32)[n_arm]
+        self.joint_start, self.n_arm = joint_start, n_arm
+        self.hold, self.hold_offset = hold, hold_offset
+        self.grip_closed = grip_closed
+        self.box = torch.as_tensor([[[1e3, 1e3, 1e3, 0.01, 0.01, 0.01]]], **f32)
+        self.cloud = None
+
+    def set_boxes(self, boxes):
+        t = torch.as_tensor(np.asarray(boxes, np.float32), device=self.device)
+        self.box = t.reshape(-1, 6)[:, None] if t.dim() < 3 else t
+
+    def set_cloud(self, points):
+        self.cloud = (
+            None
+            if points is None or not len(points)
+            else torch.as_tensor(np.asarray(points, np.float32), device=self.device)
+        )
+
+    def dist(self, points: Tensor, box: Tensor) -> Tensor:
+        return obstacle_dist(points, box, self.cloud)
+
+    def joints(self, traj: Tensor) -> tuple[Tensor, Tensor]:
+        s, n = self.joint_start, self.n_arm
+        act = traj[..., s : s + n] * self.js + self.jm
+        obs = traj[..., :n] * self.ss + self.sm
+        return torch.deg2rad(act), torch.deg2rad(obs)
+
+    def clearance_t(self, traj: Tensor, box: Tensor | None = None) -> Tensor:
+        if box is None:
+            box = self.box
+        n = self.n_arm
+        worst = []
+        for q in self.joints(traj):
+            b, t = q.shape[:2]
+            flat = q.reshape(-1, n).float()
+            pts = self.fc.arm_points(flat).reshape(b, t, -1, 3)
+            d = self.dist(pts, box)
+            worst.append((d - self.fc.radius).amin(dim=2))
+            if self.hold > 0:
+                held = self.fc.held_point(flat, self.hold_offset).reshape(b, t, 3)
+                grip = traj[..., self.joint_start + n] * self.gs + self.gm
+                dh = self.dist(held, box) - self.hold
+                worst.append(
+                    torch.where(grip < self.grip_closed, dh, torch.ones_like(dh))
+                )
+        return torch.stack(worst).amin(dim=0)
+
+    @torch.no_grad()
+    def score(self, traj: Tensor) -> Tensor:
+        boxes = self.box
+        if len(boxes) == 1:
+            boxes = boxes.expand(len(traj), *boxes.shape[1:])
+        else:
+            boxes = boxes.repeat_interleave(len(traj) // len(boxes), dim=0)
+        out = []
+        for i in range(0, len(traj), 8):
+            c = traj[i : i + 8]
+            pen = (-self.clearance_t(c, boxes[i : i + 8])).clamp(min=0.0).sum(dim=1)
+            out.append(pen)
+        return torch.cat(out)
