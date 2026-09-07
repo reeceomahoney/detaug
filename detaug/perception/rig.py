@@ -55,7 +55,7 @@ class PiperPoseReader:
         ):
             raise RuntimeError(
                 f"CAN interface {self.can_interface} is not up; "
-                "activate it with piper_sdk's can_activate.sh"
+                "activate it with scripts/hardware/can_activate.py"
             )
         module = importlib.import_module("piper_sdk")
         self.interface = module.C_PiperInterface_V2(self.can_interface)

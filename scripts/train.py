@@ -11,13 +11,13 @@ import draccus
 import newton.viewer
 import numpy as np
 import torch
+import wandb
 from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, OBS_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
 from safetensors.torch import load_file
 
-import wandb
 from detaug.envs import EnvConfig, FrankaConfig, make_env
 from detaug.envs.franka import box_pointcloud, subsample_cloud
 from detaug.envs.libero import box_surface_cloud
