@@ -54,7 +54,8 @@ torchcodec = { version = ">=0.12", index = "https://download.pytorch.org/whl/cu1
 [tool.pixi.tasks]
 video = "python scripts/record.py --record False --episodes 1 --env.type franka --env.world_count 1 --video out.mp4"
 record = "lerobot-record --config_path=configs/record.yaml"
-rollout = "lerobot-rollout --config_path=configs/rollout.yaml --discover_packages_path=detaug"
+rollout = "python scripts/rollout.py --config_path=configs/rollout.yaml --discover_packages_path=detaug"
+perception = "python -m detaug.perception.track_obstacle"
 
 [tool.pixi.tasks.vast]
 args = [{ "arg" = "exec", "default" = "" }]

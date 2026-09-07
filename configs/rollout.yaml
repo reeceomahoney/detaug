@@ -6,6 +6,9 @@ inference:
 
 robot:
   type: piper
+  # the policy is state-only, and the perception process owns the top and left
+  # RealSense streams; opening them here fails with "Device or resource busy"
+  cameras: {}
   teleop_mode: false
   action_ema_alpha: 1.0
   clip_action: false
@@ -17,11 +20,20 @@ policy:
   path: reece-omahoney/piper-pick-and-place-aug
   n_action_steps: 30
   zero_cond: true
-  dtype: bfloat16
+
+detaug:
+  obstacle_url: http://127.0.0.1:8080/obstacle.json
+  n_cond: 8
+  collision: box
+  radius: 0.045
+  margin: 0.02
+  hold: 0.0
+  deviation: 0.0
+  resample: true
 
 
 fps: 20
 task: Pick and place the pepper shaker
-use_torch_compile: true
+use_torch_compile: false
 display_data: false
 device: cuda
