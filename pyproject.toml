@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Flow Planning Project"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = ["hf-libero>=0.1.4,<0.2", "newton[examples]>=1.4.0"]
+dependencies = ["hf-libero>=0.1.4,<0.2", "newton[examples]==1.4.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -30,7 +30,6 @@ lerobot = { version = ">=0.6.1, <0.7", extras = [
 ] }
 lerobot_robot_piper = { git = "https://github.com/reeceomahoney/lerobot-piper", subdirectory = "lerobot_robot_piper" }
 lerobot_teleoperator_piper = { git = "https://github.com/reeceomahoney/lerobot-piper", subdirectory = "lerobot_teleoperator_piper" }
-newton = { version = "==1.4.0", extras = ["examples"] }
 pre-commit = ">=4.6.0"
 pytorch-volumetric = ">=0.6.0"
 rerun-sdk = ">=0.26.2"
@@ -40,6 +39,7 @@ vastai-sdk = ">=1.5"
 slurm-tools = { git = "https://github.com/reeceomahoney/slurm-tools.git" }
 torchcodec = { version = ">=0.12", index = "https://download.pytorch.org/whl/cu130" }
 ty = ">=0.0.46"
+typer = "<0.24"
 wandb = ">=0.24.2"
 
 [tool.pixi.pypi-options.dependency-overrides]
