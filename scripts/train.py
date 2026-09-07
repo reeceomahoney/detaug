@@ -15,6 +15,7 @@ from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, OBS_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
+from safetensors.torch import load_file
 
 import wandb
 from flow_planning.envs import EnvConfig, FrankaConfig, make_env
@@ -40,6 +41,9 @@ class Config:
     cond_dim: int = -1  # -1: take it from the dataset's bend feature
     cloud_points: int = 0  # >0: condition on a scene point cloud of this many points
     balance_tasks: bool = False  # sample windows uniformly per task_index
+    init_from: str = ""
+    freeze_backbone: bool = False
+    save_at: str = ""
     seed: int = 0
     warmup_iters: int = 500
     ema_decay: float = 0.999
@@ -186,6 +190,20 @@ def main(cfg: Config):
     assert stats is not None
 
     policy = FlowMatchingPolicy(policy_cfg, dataset_stats=stats).to(device)
+    if cfg.init_from:
+        base = load_file(str(Path(cfg.init_from) / "model.safetensors"), device=device)
+        missing, unexpected = policy.load_state_dict(base, strict=False)
+        assert not unexpected, unexpected
+        print(f"init from {cfg.init_from}: new params {sorted(missing)}")
+        if hasattr(policy.model, "cond_mlp"):
+            for param in policy.model.cond_mlp[-1].parameters():
+                param.data.zero_()
+    if cfg.freeze_backbone:
+        keep = ("cond_mlp", "cloud_enc", "cloud_out", "null_cond", ".mod.")
+        for name, param in policy.named_parameters():
+            param.requires_grad = any(k in name for k in keep)
+        n_train = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        print(f"backbone frozen: {n_train / 1e6:.2f}M trainable")
     policy.model = cast(FlowTransformer, torch.compile(policy.model))
 
     use_amp = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
@@ -284,6 +302,7 @@ def main(cfg: Config):
     ema = EMA(policy.model, cfg.ema_decay)
 
     policy.train()
+    save_at = {int(v) for v in cfg.save_at.split(",") if v}
     last_log_time = time.perf_counter()
     for it in range(cfg.num_iters):
         if weights is not None:
@@ -324,6 +343,10 @@ def main(cfg: Config):
                 flush=True,
             )
 
+        if it in save_at:
+            ema.store(policy.model)
+            save_policy(policy, preprocessor, postprocessor, out_dir / f"step{it}")
+            ema.restore(policy.model)
         if env is not None and it > 0 and it % cfg.eval_every == 0:
             ema.store(policy.model)
             evaluate(policy, env, preprocessor, postprocessor, cfg.eval_episodes, it)

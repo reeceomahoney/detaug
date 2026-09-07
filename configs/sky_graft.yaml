@@ -1,0 +1,63 @@
+name: graft
+
+resources:
+  infra: ssh/ori
+  accelerators: RTX4090:1
+  cpus: 14
+
+envs:
+  HF_TOKEN:
+  WANDB_API_KEY:
+  MUJOCO_GL: egl
+  HF_DATASETS_DISABLE_PROGRESS_BARS: 1
+  CMAKE_POLICY_VERSION_MINIMUM: 3.5
+  METHOD: detaug
+  REGIME: frozen
+  SEED: 0
+  ITERS: 20000
+  SAVE_AT: "1000,2000,5000,10000"
+  EPS: 2
+  WALL: 0.30
+workdir: .
+
+setup: |
+  curl -fsSL https://pixi.sh/install.sh | sh
+  export PATH="$HOME/.pixi/bin:$PATH"
+  cd ~/sky_workdir && pixi install
+
+run: |
+  export PATH="$HOME/.pixi/bin:$PATH"
+  SNAP=$(mktemp -d ~/snap.XXXXXX)
+  rsync -a --exclude .pixi --exclude outputs --exclude wandb ~/sky_workdir/ $SNAP/
+  ln -s ~/sky_workdir/.pixi $SNAP/.pixi; mkdir -p ~/sky_workdir/outputs; ln -s ~/sky_workdir/outputs $SNAP/outputs
+  cd $SNAP
+  grep -q "save_at" scripts/train.py || { echo "stale workdir"; exit 1; }
+  export LD_LIBRARY_PATH="$PWD/.pixi/envs/default/lib:$LD_LIBRARY_PATH"
+  q() { "$@" 2>&1 | grep --line-buffered -vE "it/s|Warning|examples/s|EGL|egl_|OpenGL|glCheck|binding_utils|raise self|^\s*$"; }
+  BASE=outputs/franka/2026-08-13/02-10-06
+  case $METHOD in
+    detaug) REPO=franka-transit; TRAIN="--cond_dim -1"; ARM="--cond search --n_cond 8"; FREE="--cond zero";;
+    demogen) REPO=franka-demogen-pc; TRAIN="--cond_dim 0 --cloud_points 256"; ARM="--cond cloud --n_cond 1"; FREE="--cond cloud";;
+  esac
+  [ $REGIME = frozen ] && TRAIN="$TRAIN --freeze_backbone true"
+  RUN=outputs/franka/graft/${METHOD}-${REGIME}-s$SEED
+  echo "##### train $RUN: $TRAIN"
+  [ -f $RUN/model.safetensors ] || q pixi run python scripts/train.py --env.type franka --repo_id reece-omahoney/$REPO \
+    --horizon 599 --num_iters $ITERS --eval_every 0 --seed $SEED --run_dir $RUN --init_from $BASE --save_at $SAVE_AT $TRAIN
+  ev() {
+    f=$RUN/eval/$1.log; mkdir -p $RUN/eval; ck=$2; shift 2
+    grep -q "^overall" $f 2>/dev/null && { echo "skip $f"; return; }
+    pixi run python scripts/eval.py --env.type franka --env.world_count 128 --episodes $EPS \
+      --repo_id reece-omahoney/$REPO --checkpoint $ck "$@" > $f 2>&1
+    echo "$(basename $f .log) $(grep -aE '^overall' $f | tr '\n' ' ')"
+  }
+  for S in ${SAVE_AT//,/ } $ITERS; do
+    ck=$RUN/step$S; [ $S = $ITERS ] && ck=$RUN
+    ev wall${WALL}_$S $ck --env.obstacle true --env.obstacle_height $WALL $ARM
+    ev free_$S $ck --env.obstacle false $FREE
+  done
+  ev dy${WALL}_$ITERS $RUN --env.obstacle true --env.obstacle_height $WALL --env.obstacle_dy -0.08 $ARM
+  [ $METHOD = demogen ] && ev wall${WALL}n8_$ITERS $RUN --env.obstacle true --env.obstacle_height $WALL --cond cloud --n_cond 8
+  echo "##### TABLE $RUN"
+  for f in $RUN/eval/*.log; do echo "$(basename $f .log) $(grep -aE '^overall' $f | tr '\n' ' ')"; done
+  rm -rf $SNAP
