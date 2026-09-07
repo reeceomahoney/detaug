@@ -1,8 +1,8 @@
-# DetAug
+# DetAug: Obstacle-Blind Trajectory Augmentation for Zero-shot Obstacle Avoidance
 
-Obstacle-blind flow-matching policies that stay task-valid under inference-time
-obstacle avoidance. Environments: `franka` (Newton), `libero` (SafeLIBERO), and
-`piper` (real arm).
+Augment obstacle-free demonstrations with detour trajectories so a flow-matching
+policy can avoid obstacles it never saw in training. Environments: `franka`
+(Newton), `libero` (SafeLIBERO), and `piper` (real arm).
 
 ## Setup
 
