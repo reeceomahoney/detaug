@@ -22,6 +22,7 @@ cmake = ">=4.4.2,<5"
 
 [tool.pixi.pypi-dependencies]
 detaug = { path = ".", editable = true }
+opencv-python = "==4.13.0.92"
 lerobot = { version = ">=0.6.1, <0.7", extras = [
   "dataset",
   "hardware",
@@ -43,6 +44,7 @@ typer = "<0.24"
 wandb = ">=0.24.2"
 
 [tool.pixi.pypi-options.dependency-overrides]
+opencv-python-headless = { version = "*", env-markers = "sys_platform == 'never'" }
 torch = { version = ">=2.11.0", index = "https://download.pytorch.org/whl/cu130" }
 mujoco = "==3.10.0"
 mujoco-warp = "==3.10.0.3"
