@@ -12,9 +12,15 @@ envs:
   MUJOCO_GL: egl
   HF_DATASETS_DISABLE_PROGRESS_BARS: 1
   CMAKE_POLICY_VERSION_MINIMUM: 3.5
-  NAME: spatial_goal
-  SEED: 1
-  ITERS: 40000
+  SUITE: safelibero_long
+  NAME: long_goal
+  TASKS: "0 1 2 3"
+  ITERS: 20000
+  SEEDS: "0 1 2"
+  CELLS: "0_II 1_I 1_II 2_I 2_II 3_I 3_II"
+  PAR: 4
+  AUG: "--copies 0 --orig_copies 1"
+  TAG: ""
 workdir: .
 setup: |
   curl -fsSL https://pixi.sh/install.sh | sh
@@ -27,23 +33,34 @@ run: |
   rsync -a --exclude .pixi --exclude outputs --exclude wandb ~/sky_workdir/ $SNAP/
   ln -s ~/sky_workdir/.pixi $SNAP/.pixi; mkdir -p ~/sky_workdir/outputs; ln -s ~/sky_workdir/outputs $SNAP/outputs
   cd $SNAP
-  grep -q "prior_stretch" flow_planning/policy.py || { echo "stale workdir"; exit 1; }
+  grep -q "cape_prefix" scripts/eval.py || { echo "stale workdir"; exit 1; }
   export LD_LIBRARY_PATH="$PWD/.pixi/envs/default/lib:$LD_LIBRARY_PATH"
-  ENV="--env.type libero --env.suite safelibero_spatial --env.task_onehot 4 --env.target_obs true --env.goal_dim 3 --env.goal_state_start 18 --env.n_action_steps 10 --env.world_count 10"
-  RUN=outputs/libero/${NAME}_s$SEED
-  echo "##### train $RUN"
-  [ -f $RUN/model.safetensors ] || pixi run python scripts/train.py $ENV --repo_id reece-omahoney/$NAME \
-    --horizon 0 --num_iters $ITERS --eval_every 0 --balance_tasks true --seed $SEED --run_dir $RUN \
-    2>&1 | grep --line-buffered -vE "it/s|Warning|examples/s|^\s*$"
-  run() { # CELL TAG ARGS...
-    OUT=outputs/cape_goal_s$SEED; mkdir -p $OUT; C=$1; TAG=$2; shift 2; f=$OUT/${TAG}_$C.log
+  export OMP_NUM_THREADS=4
+  CACHE=~/.cache/huggingface/lerobot/reece-omahoney
+  ENV="--env.type libero --env.suite $SUITE --env.task_onehot 0 --env.target_obs true --env.n_action_steps 10 --env.world_count 10"
+  q() { "$@" 2>&1 | grep --line-buffered -vE "it/s|Warning|examples/s|EGL|egl_|OpenGL|glCheck|binding_utils|raise self|^\s*$"; }
+  run() { # CELL (t_l) or free_t
+    OUT=outputs/eval_${DS}${TAG}_s$SEED; mkdir -p $OUT; f=$OUT/$1.log
     grep -q "^overall" $f 2>/dev/null && { echo "skip $f"; return; }
-    if [[ $C == free_* ]]; then t=${C#free_}; l=I; OBS="--env.obstacle false"; else t=${C%_*}; l=${C#*_}; OBS="--env.obstacle true"; fi
-    OMP_NUM_THREADS=2 pixi run python scripts/eval.py $ENV --env.task_id $t --env.level $l $OBS \
-      --repo_id reece-omahoney/$NAME --checkpoint $RUN --episodes 5 --cond zero "$@" > $f 2>&1
-    echo "$(basename $f .log) $(grep -aE '^overall' $f | tr '\n' ' ')"
+    if [[ $1 == free_* ]]; then t=${1#free_}; l=I; ARM="--env.obstacle false"; else t=${1%_*}; l=${1#*_}; ARM="--env.obstacle true --cape true"; fi
+    OMP_NUM_THREADS=2 pixi run python scripts/eval.py $ENV --env.task_id $t --env.level $l $ARM \
+      --repo_id reece-omahoney/$DS --checkpoint $RUN --episodes 5 --cond zero > $f 2>&1
+    echo "done $f $(grep -aE '^overall' $f | tr '\n' ' ')"
   }
-  export -f run; export ENV NAME RUN SEED
-  { for C in 1_I 1_II 2_I 2_II 3_I 3_II; do echo "$C cape --cape true"; done
-    for T in 1 2 3; do echo "free_$T base"; done; } | xargs -P 4 -L 1 bash -c 'run "$@"' _
+  export -f run; export ENV TAG
+  for G in $TASKS; do
+    DS=${NAME}_t$G; export DS
+    MYCELLS=$(for C in $CELLS; do [ ${C%_*} = $G ] && echo $C; done)
+    echo "##### augment $DS"
+    [ -d $CACHE/$DS ] || q pixi run python scripts/augment.py $ENV --env.level I --task_ids "[$G]" --dst_repo reece-omahoney/$DS \
+      --n_seg 4 --bend_margin 0.4 --ik_iters 32 --ik_tol 0.01 --vel_frac 0.8 $AUG
+    for SEED in $SEEDS; do
+      RUN=outputs/libero/${DS}_s$SEED; export SEED RUN
+      echo "##### train $RUN"
+      [ -f $RUN/model.safetensors ] || q pixi run python scripts/train.py $ENV --env.task_id $G --env.goal_dim 3 --env.goal_state_start -1 \
+        --repo_id reece-omahoney/$DS --horizon 0 --num_iters $ITERS --eval_every 0 --seed $SEED --run_dir $RUN --wandb_mode disabled
+      { for C in $MYCELLS; do echo "$C"; done; echo "free_$G"; } | xargs -P $PAR -L 1 bash -c 'run "$@"' _
+    done
+  done
+  echo "##### ALL DONE $NAME"
   rm -rf $SNAP

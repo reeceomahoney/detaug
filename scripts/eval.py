@@ -85,6 +85,9 @@ class Config:
     cape_stretch: bool = True  # paper: re-time the remainder; False: hold the tail
     cape_radius: float = 0.08  # EE sphere radius
     cape_margin: float = 0.02  # safety margin epsilon (paper 0.06)
+    goal_offset: bool = (
+        True  # goal-clamped policies: add the demos' mean (final held - target)
+    )
 
 
 def sample_cond(bend: np.ndarray, k: int, rng, device) -> torch.Tensor:
@@ -261,6 +264,17 @@ def main(cfg: Config):
 
             policy.chunk_fn = project
 
+    offset = None
+    if cfg.goal_offset and policy.config.goal_dim == 3 and hasattr(env, "held_slot"):
+        gs = policy.config.goal_state_start
+        o_all = hf_column(dataset.hf_dataset, "observation.state")
+        ep_all = hf_column(dataset.hf_dataset, "episode_index")
+        last = np.flatnonzero(np.diff(ep_all, append=ep_all[-1] + 1))
+        offset = (
+            (o_all[last, gs : gs + 3] - o_all[last, -3:]).mean(0).astype(np.float32)
+        )
+        print(f"goal offset (final held - target, demo mean): {offset.round(3)}")
+
     cape = None
     if cfg.cape:
         assert cfg.env.obstacle and hasattr(env, "obstacle_boxes")
@@ -342,7 +356,10 @@ def main(cfg: Config):
         pbar = tqdm(total=frames, desc=f"batch {ep}", leave=False)
         while frame < frames and viewer.is_running():
             if viewer.should_step():
-                obs = torch.from_numpy(env.get_obs())
+                raw = env.get_obs()
+                if offset is not None:
+                    raw[:, -3:] += offset
+                obs = torch.from_numpy(raw)
                 last_obs = obs
                 action = policy.select_action(preprocessor({OBS_STATE: obs}))
                 phys = postprocessor(action).numpy().astype(np.float32)
