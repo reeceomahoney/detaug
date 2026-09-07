@@ -10,9 +10,9 @@ import torch
 from huggingface_hub import hf_hub_download
 from scipy.spatial.transform import Rotation as R
 
-from flow_planning.bend import ARM, fk, held_segments, obj_slice, solve_seq, tpad
-from flow_planning.envs import EnvConfig
-from flow_planning.envs.libero import (
+from detaug.bend import ARM, fk, held_segments, obj_slice, solve_seq, tpad
+from detaug.envs import EnvConfig
+from detaug.envs.libero import (
     GRIPPER_OPEN,
     HF_DEMOS,
     SOURCE_SUITE,
@@ -20,7 +20,7 @@ from flow_planning.envs.libero import (
     LiberoEnv,
     demo_to_episode,
 )
-from flow_planning.kinematics import EE_FRAME, build_franka_chain
+from detaug.kinematics import EE_FRAME, build_franka_chain
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -5,8 +5,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from flow_planning.kinematics import EE_FRAME, build_franka_chain
-from flow_planning.selector import POINTS_PER_LINK, box_sdf
+from detaug.kinematics import EE_FRAME, build_franka_chain
+from detaug.selector import POINTS_PER_LINK, box_sdf
 
 EE_AXES = (0.06, 0.12, 0.11)
 EE_OFFSET = (0.0, 0.0, -0.056)

@@ -3030,7 +3030,7 @@ packages:
   size: 147954
   timestamp: 1780946721169
 - pypi: ./
-  name: flow-planning
+  name: detaug
   requires_dist:
   - hf-libero>=0.1.4,<0.2
   - newton[examples]==1.4.0

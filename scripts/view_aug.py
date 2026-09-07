@@ -12,9 +12,9 @@ from robosuite.utils.camera_utils import (
     project_points_from_world_to_camera,
 )
 
-from flow_planning.envs.libero import LiberoConfig, LiberoEnv
-from flow_planning.kinematics import EE_FRAME, build_franka_chain
-from flow_planning.selector import FrankaCollision
+from detaug.envs.libero import LiberoConfig, LiberoEnv
+from detaug.kinematics import EE_FRAME, build_franka_chain
+from detaug.selector import FrankaCollision
 
 GREY, GREEN, RED = (160, 160, 160), (0, 220, 0), (0, 0, 255)
 

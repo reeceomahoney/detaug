@@ -1,7 +1,7 @@
 [project]
-name = "flow_planning"
+name = "detaug"
 version = "0.1.0"
-description = "Flow Planning Project"
+description = "DetAug"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = ["hf-libero>=0.1.4,<0.2", "newton[examples]==1.4.0"]
@@ -21,7 +21,7 @@ ffmpeg = ">=8.1.2,<9"
 cmake = ">=4.4.2,<5"
 
 [tool.pixi.pypi-dependencies]
-flow_planning = { path = ".", editable = true }
+detaug = { path = ".", editable = true }
 lerobot = { version = ">=0.6.1, <0.7", extras = [
   "dataset",
   "hardware",
@@ -52,7 +52,7 @@ torchcodec = { version = ">=0.12", index = "https://download.pytorch.org/whl/cu1
 [tool.pixi.tasks]
 video = "python scripts/record.py --record False --episodes 1 --env.type franka --env.world_count 1 --video out.mp4"
 record = "lerobot-record --config_path=configs/record.yaml"
-rollout = "lerobot-rollout --config_path=configs/rollout.yaml --discover_packages_path=flow_planning"
+rollout = "lerobot-rollout --config_path=configs/rollout.yaml --discover_packages_path=detaug"
 
 [tool.pixi.tasks.vast]
 args = [{ "arg" = "exec", "default" = "" }]
@@ -80,9 +80,9 @@ select = ["E", "F", "I"]
 # warp's kernel DSL confuses type checkers
 [[tool.ty.overrides]]
 include = [
-  "flow_planning/envs/contact.py",
-  "flow_planning/envs/franka.py",
-  "flow_planning/envs/libero.py",
+  "detaug/envs/contact.py",
+  "detaug/envs/franka.py",
+  "detaug/envs/libero.py",
 ]
 
 [tool.ty.overrides.rules]

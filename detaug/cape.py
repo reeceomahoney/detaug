@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from flow_planning.kinematics import build_franka_chain, ee_positions
-from flow_planning.selector import box_sdf
+from detaug.kinematics import build_franka_chain, ee_positions
+from detaug.selector import box_sdf
 
 
 class CapeGuidance:

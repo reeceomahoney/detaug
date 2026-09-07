@@ -1,6 +1,6 @@
 import numpy as np
 
-from flow_planning.plan import retime, rrt_connect, shortcut, smooth_pinned
+from detaug.plan import retime, rrt_connect, shortcut, smooth_pinned
 
 
 def test_rrt_around_wall():

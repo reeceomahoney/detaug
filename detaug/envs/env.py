@@ -36,8 +36,8 @@ def world_offset(viewer, first=False):
 
 
 def make_env(cfg: EnvConfig, viewer):
-    from flow_planning.envs.franka import FrankaConfig, FrankaEnv
-    from flow_planning.envs.libero import LiberoConfig, LiberoEnv
+    from detaug.envs.franka import FrankaConfig, FrankaEnv
+    from detaug.envs.libero import LiberoConfig, LiberoEnv
 
     if isinstance(cfg, FrankaConfig):
         return FrankaEnv(cfg, viewer)

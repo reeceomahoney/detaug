@@ -13,18 +13,18 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, OBS_STATE
 from tqdm import tqdm
 
-from flow_planning.bend import LABEL_DIM
-from flow_planning.cape import CapeGuidance
-from flow_planning.cbf import EllipsoidCBF
-from flow_planning.envs import EnvConfig, FrankaConfig, make_env
-from flow_planning.envs.franka import subsample_cloud
-from flow_planning.kinematics import build_franka_chain, ee_positions
-from flow_planning.policy import (
+from detaug.bend import LABEL_DIM
+from detaug.cape import CapeGuidance
+from detaug.cbf import EllipsoidCBF
+from detaug.envs import EnvConfig, FrankaConfig, make_env
+from detaug.envs.franka import subsample_cloud
+from detaug.kinematics import build_franka_chain, ee_positions
+from detaug.policy import (
     FlowMatchingPolicy,
     make_flow_matching_pre_post_processors,
 )
-from flow_planning.selector import AnalyticSelector, FrankaCollision
-from flow_planning.utils import hf_column, latest_run_dir, make_viewer
+from detaug.selector import AnalyticSelector, FrankaCollision
+from detaug.utils import hf_column, latest_run_dir, make_viewer
 
 np.set_printoptions(linewidth=100000)
 

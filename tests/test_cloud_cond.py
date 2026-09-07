@@ -2,8 +2,8 @@ import numpy as np
 import torch
 from lerobot.configs.types import FeatureType, PolicyFeature
 
-from flow_planning.envs.franka import box_pointcloud, subsample_cloud
-from flow_planning.policy import FlowMatchingConfig, FlowTransformer
+from detaug.envs.franka import box_pointcloud, subsample_cloud
+from detaug.policy import FlowMatchingConfig, FlowTransformer
 
 
 def test_cloud_pathway_and_null_fallback():

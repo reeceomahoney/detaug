@@ -1,4 +1,4 @@
-# Flow Planning
+# DetAug
 
 Obstacle-blind flow-matching policies that stay task-valid under inference-time
 obstacle avoidance. Environments: `franka` (Newton), `libero` (SafeLIBERO), and
@@ -61,11 +61,11 @@ pixi run rollout    # configs/rollout.yaml
 
 Live obstacle tracking from two RealSense cameras (overhead and wrist) with
 SAM2, fused into a box in the Piper base frame and shown on a dashboard at
-`http://<host>:8080`. Everything lives in `flow_planning/perception/` and runs
-with `pixi run python -m flow_planning.perception.<module>`.
+`http://<host>:8080`. Everything lives in `detaug/perception/` and runs with
+`pixi run python -m detaug.perception.<module>`.
 
 ```bash
-pixi run python -m flow_planning.perception.track_obstacle
+pixi run python -m detaug.perception.track_obstacle
 ```
 
 Calibration files are loaded from `outputs/perception/`. Regenerate them when
@@ -79,4 +79,4 @@ the setup changes:
 - `track_obstacle --select-targets`: object references that initialise tracking.
   Rerun when changing the tracked object.
 
-Camera serials and the SAM2 model id are in `flow_planning/perception/rig.py`.
+Camera serials and the SAM2 model id are in `detaug/perception/rig.py`.

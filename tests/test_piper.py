@@ -1,7 +1,7 @@
 import numpy as np
 
-from flow_planning.bend import carry_segment, fk, solve_seq
-from flow_planning.kinematics import build_piper_chain
+from detaug.bend import carry_segment, fk, solve_seq
+from detaug.kinematics import build_piper_chain
 
 
 def test_carry_segment_is_the_inner_closed_run():

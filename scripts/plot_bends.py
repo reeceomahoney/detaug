@@ -7,7 +7,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from augment import Config
 
-from flow_planning.bend import EE, bend_delta, transit_segments
+from detaug.bend import EE, bend_delta, transit_segments
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402

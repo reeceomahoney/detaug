@@ -10,10 +10,10 @@ import warp as wp
 from augment import sdf_np
 from scipy.ndimage import gaussian_filter
 
-import flow_planning.envs.franka as franka
-from flow_planning.bend import bend_delta
-from flow_planning.envs.env import world_offset
-from flow_planning.envs.franka import FrankaConfig, FrankaEnv, TaskType
+import detaug.envs.franka as franka
+from detaug.bend import bend_delta
+from detaug.envs.env import world_offset
+from detaug.envs.franka import FrankaConfig, FrankaEnv, TaskType
 
 COLORS = [(0.2, 0.45, 0.9)]
 ORANGE = (1.0, 0.4, 0.0)

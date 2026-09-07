@@ -1,6 +1,6 @@
 import torch
 
-from flow_planning.cape import CapeGuidance
+from detaug.cape import CapeGuidance
 
 
 def test_cape_grad_reduces_cost():

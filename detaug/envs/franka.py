@@ -14,9 +14,9 @@ import newton.utils
 import numpy as np
 import warp as wp
 
-from flow_planning.envs.contact import ObstacleContactSensor
-from flow_planning.envs.env import EnvConfig, world_offset
-from flow_planning.utils import quat_to_rot6d
+from detaug.envs.contact import ObstacleContactSensor
+from detaug.envs.env import EnvConfig, world_offset
+from detaug.utils import quat_to_rot6d
 
 wp.config.quiet = True
 

@@ -12,7 +12,7 @@ import torch
 from huggingface_hub import hf_hub_download
 from scipy.spatial.transform import Rotation as R
 
-from flow_planning.bend import (
+from detaug.bend import (
     ARM,
     SEG_ZERO,
     build,
@@ -24,8 +24,8 @@ from flow_planning.bend import (
     tpad,
     yaw_of_quat,
 )
-from flow_planning.envs import EnvConfig
-from flow_planning.envs.libero import (
+from detaug.envs import EnvConfig
+from detaug.envs.libero import (
     HF_DEMOS,
     SOURCE_SUITE,
     LiberoConfig,
@@ -34,8 +34,8 @@ from flow_planning.envs.libero import (
     demo_to_episode,
     obstacle_geom_boxes,
 )
-from flow_planning.kinematics import EE_FRAME, build_franka_chain
-from flow_planning.selector import FrankaCollision, box_sdf
+from detaug.kinematics import EE_FRAME, build_franka_chain
+from detaug.selector import FrankaCollision, box_sdf
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 ZERO = SEG_ZERO

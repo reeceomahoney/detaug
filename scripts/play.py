@@ -9,8 +9,8 @@ import numpy as np
 import warp as wp
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from flow_planning.envs import FrankaConfig, make_env
-from flow_planning.utils import hf_column, make_viewer
+from detaug.envs import FrankaConfig, make_env
+from detaug.utils import hf_column, make_viewer
 
 
 @dataclass

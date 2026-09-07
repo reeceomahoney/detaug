@@ -1,7 +1,7 @@
 clusters:
   civo:
     host: civo
-    remote_path: /users/kebl6123/flow-planning
+    remote_path: /users/kebl6123/detaug
     time: 12
     gpu: nvidia_a100-sxm4-80gb
     ngpu: 1

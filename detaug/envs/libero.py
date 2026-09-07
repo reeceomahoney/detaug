@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from flow_planning.envs.env import EnvConfig
-from flow_planning.utils import quat_to_rot6d
+from detaug.envs.env import EnvConfig
+from detaug.utils import quat_to_rot6d
 
 HF_DEMOS = "yifengzhu-hf/LIBERO-datasets"
 HF_SAFE = "THURCSCT/SafeLIBERO"
@@ -96,7 +96,7 @@ def libero_package_root() -> Path:
 def ensure_libero_config():
     cfg_dir = Path(
         os.environ.setdefault(
-            "LIBERO_CONFIG_PATH", str(Path.home() / ".cache/flow_planning/libero")
+            "LIBERO_CONFIG_PATH", str(Path.home() / ".cache/detaug/libero")
         )
     )
     cfg_file = cfg_dir / "config.yaml"
@@ -118,7 +118,7 @@ def patch_robosuite():
     import mujoco
     import robosuite.controllers.base_controller as bc
 
-    if getattr(bc, "flow_planning_patched", False):
+    if getattr(bc, "detaug_patched", False):
         return
 
     class Shim:
@@ -139,7 +139,7 @@ def patch_robosuite():
 
     setattr(bc, "mujoco", shim)
     bc.Controller.update = update
-    setattr(bc, "flow_planning_patched", True)
+    setattr(bc, "detaug_patched", True)
 
 
 def safelibero_root() -> Path:

@@ -10,7 +10,7 @@ from scipy.signal import lfilter, lfilter_zi
 from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
-from flow_planning.bend import (
+from detaug.bend import (
     ARM,
     CUBE,
     EE,
@@ -29,12 +29,12 @@ from flow_planning.bend import (
     track_delta,
     transit_segments,
 )
-from flow_planning.envs import EnvConfig, FrankaConfig
-from flow_planning.envs.env import PiperConfig
-from flow_planning.kinematics import EE_FRAME, build_franka_chain, build_piper_chain
-from flow_planning.plan import retime, rrt_connect, shortcut, smooth_pinned
-from flow_planning.selector import FrankaCollision, box_sdf
-from flow_planning.utils import hf_column, quat_to_rot6d, rot6d_to_quat
+from detaug.envs import EnvConfig, FrankaConfig
+from detaug.envs.env import PiperConfig
+from detaug.kinematics import EE_FRAME, build_franka_chain, build_piper_chain
+from detaug.plan import retime, rrt_connect, shortcut, smooth_pinned
+from detaug.selector import FrankaCollision, box_sdf
+from detaug.utils import hf_column, quat_to_rot6d, rot6d_to_quat
 
 
 @dataclass
@@ -174,7 +174,7 @@ def libero_demos(cfg, env, chain, base, limit):
     import h5py
     from huggingface_hub import hf_hub_download
 
-    from flow_planning.envs.libero import (
+    from detaug.envs.libero import (
         HF_DEMOS,
         SOURCE_SUITE,
         body_aabb,
@@ -306,7 +306,7 @@ WALL_K = 40
 
 
 def harvest_obstacles(cfg, task_ids):
-    from flow_planning.envs.libero import (
+    from detaug.envs.libero import (
         LiberoEnv,
         libero_setup,
         obstacle_geom_boxes,
@@ -731,7 +731,7 @@ def libero_solve(cfg, cands, demos, chain, base, fcol, rng=None):
 
 
 def augment_libero(cfg):
-    from flow_planning.envs.libero import LiberoConfig, LiberoEnv
+    from detaug.envs.libero import LiberoConfig, LiberoEnv
 
     assert isinstance(cfg.env, LiberoConfig)
     rng = np.random.default_rng(cfg.seed)
@@ -1098,7 +1098,7 @@ def main(cfg: Config):
         cube_size = cfg.env.cube_size
     else:
         assert not cfg.demogen, "demogen bends need the franka wall geometry"
-        from flow_planning.envs.libero import LiberoConfig, LiberoEnv
+        from detaug.envs.libero import LiberoConfig, LiberoEnv
 
         assert isinstance(cfg.env, LiberoConfig)
         lenv = LiberoEnv(replace(cfg.env, world_count=1, obstacle=False))

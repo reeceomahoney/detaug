@@ -10,9 +10,9 @@ import warp as wp
 from augment import sdf_np
 from render_figure import FigureEnv, render, run_to_phase
 
-import flow_planning.envs.franka as franka
-from flow_planning.bend import bend_delta
-from flow_planning.envs.franka import FrankaConfig, TaskType
+import detaug.envs.franka as franka
+from detaug.bend import bend_delta
+from detaug.envs.franka import FrankaConfig, TaskType
 
 BLUE, GREY = (0.2, 0.45, 0.9), (0.55, 0.15, 0.12)
 

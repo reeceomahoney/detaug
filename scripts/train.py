@@ -18,16 +18,16 @@ from lerobot.utils.feature_utils import dataset_to_policy_features
 from safetensors.torch import load_file
 
 import wandb
-from flow_planning.envs import EnvConfig, FrankaConfig, make_env
-from flow_planning.envs.franka import box_pointcloud, subsample_cloud
-from flow_planning.envs.libero import box_surface_cloud
-from flow_planning.policy import (
+from detaug.envs import EnvConfig, FrankaConfig, make_env
+from detaug.envs.franka import box_pointcloud, subsample_cloud
+from detaug.envs.libero import box_surface_cloud
+from detaug.policy import (
     FlowMatchingConfig,
     FlowMatchingPolicy,
     FlowTransformer,
     make_flow_matching_pre_post_processors,
 )
-from flow_planning.utils import hf_column, make_run_dir
+from detaug.utils import hf_column, make_run_dir
 
 
 @dataclass
@@ -59,7 +59,7 @@ class Config:
         0  # >0 with env.obstacle: selector search over this many bend candidates
     )
     log_every: int = 100
-    wandb_project: str = "flow-planning"
+    wandb_project: str = "detaug"
     wandb_mode: str = "online"  # "online" | "offline" | "disabled"
 
 
@@ -220,7 +220,7 @@ def main(cfg: Config):
     if env is not None and cfg.eval_search and cfg.env.obstacle:
         from eval import sample_cond
 
-        from flow_planning.selector import AnalyticSelector
+        from detaug.selector import AnalyticSelector
 
         geom = env.obstacle_geometry
         sel = AnalyticSelector(

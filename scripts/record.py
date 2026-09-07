@@ -6,8 +6,8 @@ import numpy as np
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from tqdm import tqdm
 
-from flow_planning.envs import EnvConfig, FrankaConfig, make_env
-from flow_planning.utils import make_viewer
+from detaug.envs import EnvConfig, FrankaConfig, make_env
+from detaug.utils import make_viewer
 
 
 @dataclass

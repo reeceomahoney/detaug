@@ -9,7 +9,7 @@ import trimesh
 from pytorch_volumetric import sdf as pv_sdf
 from torch import Tensor
 
-from flow_planning.kinematics import build_franka_chain
+from detaug.kinematics import build_franka_chain
 
 LINKS = [f"fr3_link{i}" for i in range(8)] + ["fr3_hand"]
 FINGERS = ["fr3_leftfinger", "fr3_rightfinger"]
