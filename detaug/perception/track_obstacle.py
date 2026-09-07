@@ -18,9 +18,7 @@ from .point_cloud_stream import (
     PointCloudStream,
     draw_gripper_marker,
     draw_projected_camera_box,
-    draw_projected_policy_trajectories,
 )
-from .policy_trajectory_stream import DemoTrajectoryStream
 from .rig import CALIBRATION_DIR, LEFT_CAMERA_SERIAL, MODEL_ID, TOP_CAMERA_SERIAL
 from .select_top_roi import CropRegion, load_region
 
@@ -69,7 +67,6 @@ def parse_args() -> argparse.Namespace:
         default=ROBOT_CALIBRATION_PATH,
     )
     parser.add_argument("--can-interface", default="can_arm_right")
-    parser.add_argument("--demo-trajectory-count", type=int, default=3)
     parser.add_argument("--select-targets", action="store_true")
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
@@ -180,10 +177,6 @@ class StatusBoard:
                 "phase": self.phase,
                 "cameras": self.cameras,
                 "outlier_trim_percent": self.live_state.outlier_trim_percent(),
-                "policy": self.live_state.policy_status(),
-                "policy_trajectories_visible": (
-                    self.live_state.policy_trajectory_visibility()
-                ),
             }
         self.live_state.publish_status(payload)
 
@@ -603,8 +596,6 @@ class ViewTracker:
         display_mask = mask
         marker = self.live_state.gripper_marker(self.name)
         camera_box = self.live_state.camera_box(self.name)
-        camera_trajectories = self.live_state.camera_trajectories(self.name)
-        pickup_steps = self.live_state.policy_pickup_steps()
         if self.crop is not None and source_image is not None:
             display_mask = np.zeros(overlay.shape[:2], dtype=bool)
             y0, y1 = self.crop.y, self.crop.y + self.crop.height
@@ -621,13 +612,6 @@ class ViewTracker:
                     (point[0] + self.crop.x, point[1] + self.crop.y)
                     for point in camera_box
                 )
-            camera_trajectories = tuple(
-                tuple(
-                    (point[0] + self.crop.x, point[1] + self.crop.y)
-                    for point in trajectory
-                )
-                for trajectory in camera_trajectories
-            )
         green = np.zeros_like(overlay)
         green[..., 1] = 255
         overlay[display_mask] = cv2.addWeighted(
@@ -651,13 +635,6 @@ class ViewTracker:
                 cv2.LINE_AA,
             )
             cv2.addWeighted(roi_overlay, 0.35, overlay, 0.65, 0.0, overlay)
-        draw_projected_policy_trajectories(
-            overlay,
-            camera_trajectories,
-            float(overlay.shape[1]),
-            float(overlay.shape[0]),
-            pickup_steps,
-        )
         draw_projected_camera_box(
             overlay,
             camera_box,
@@ -739,7 +716,7 @@ def select_targets(
     args: argparse.Namespace,
     cameras: dict[str, CameraCapture],
     board: StatusBoard,
-) -> None:
+) -> tuple[Any, Any, str, Any]:
     board.set_phase("Select the cups in both camera views")
     prompts = prompt_views(
         cameras,
@@ -781,7 +758,7 @@ def select_targets(
     board.set_phase("Targets saved")
     board.publish()
     print(f"Saved top and left targets in {args.target_dir}")
-    print("Run track_obstacle to start tracking")
+    return model, processor, device, dtype
 
 
 def align_trackers(
@@ -837,11 +814,14 @@ def track_targets(
     cameras: dict[str, CameraCapture],
     board: StatusBoard,
     targets: dict[str, dict[str, object]],
+    sam: tuple[Any, Any, str, Any] | None = None,
 ) -> None:
-    for name in cameras:
-        board.set_camera(name, message="Saved target loaded; loading SAM2")
-    board.set_phase("Loading SAM2 with saved targets")
-    model, processor, device, dtype = load_sam(args)
+    if sam is None:
+        for name in cameras:
+            board.set_camera(name, message="Saved target loaded; loading SAM2")
+        board.set_phase("Loading SAM2 with saved targets")
+        sam = load_sam(args)
+    model, processor, device, dtype = sam
     board.set_phase("Aligning saved targets")
     trackers = align_trackers(args, cameras, board, targets)
     versions = {name: -1 for name in cameras}
@@ -939,30 +919,6 @@ def main() -> None:
     live_state = LiveState()
     dashboard = None
     cloud_stream = None
-    policy_stream = None
-    if not args.select_targets:
-        cloud_stream = PointCloudStream(
-            live_state,
-            args.jpeg_quality,
-            args.camera_calibration,
-            args.robot_calibration,
-            args.top_serial,
-            args.left_serial,
-            args.can_interface,
-        )
-        cloud_stream.start()
-        policy_stream = DemoTrajectoryStream(
-            live_state,
-            args.demo_trajectory_count,
-        )
-        policy_stream.start()
-        dashboard = start_dashboard(
-            live_state,
-            args.target_dir,
-            args.bind,
-            args.port,
-        )
-        print(f"Open http://localhost:{args.port}")
     board = StatusBoard(live_state)
     cameras = {
         "top": CameraCapture(
@@ -978,12 +934,30 @@ def main() -> None:
     board.start()
     for camera in cameras.values():
         camera.start()
+    sam = None
     try:
         if args.select_targets:
-            select_targets(args, cameras, board)
-        else:
-            assert targets is not None
-            track_targets(args, cameras, board, targets)
+            sam = select_targets(args, cameras, board)
+            targets = load_targets(args)
+        assert targets is not None
+        cloud_stream = PointCloudStream(
+            live_state,
+            args.jpeg_quality,
+            args.camera_calibration,
+            args.robot_calibration,
+            args.top_serial,
+            args.left_serial,
+            args.can_interface,
+        )
+        cloud_stream.start()
+        dashboard = start_dashboard(
+            live_state,
+            args.target_dir,
+            args.bind,
+            args.port,
+        )
+        print(f"Open http://localhost:{args.port}")
+        track_targets(args, cameras, board, targets, sam)
     except KeyboardInterrupt:
         board.set_phase("Stopped")
     finally:
@@ -993,8 +967,6 @@ def main() -> None:
         board.stop()
         if cloud_stream is not None:
             cloud_stream.stop()
-        if policy_stream is not None:
-            policy_stream.stop()
         if dashboard is not None:
             dashboard.shutdown()
             dashboard.server_close()

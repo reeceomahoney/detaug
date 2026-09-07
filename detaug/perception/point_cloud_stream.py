@@ -54,11 +54,6 @@ BOX_EDGES = (
     (2, 6),
     (3, 7),
 )
-POLICY_COLORS = (
-    (255, 108, 62),
-    (62, 190, 255),
-    (226, 80, 242),
-)
 VISUAL_HULL_STEP = 0.005
 VISUAL_HULL_HALF_WIDTH = 0.12
 VISUAL_HULL_MAX_HEIGHT = 0.4
@@ -777,100 +772,6 @@ def draw_projected_camera_box(
         )
 
 
-def project_policy_trajectories(
-    trajectories: tuple[tuple[tuple[float, float, float], ...], ...],
-    camera_from_base: np.ndarray,
-    intrinsics: dict[str, Any],
-) -> tuple[tuple[tuple[float, float], ...], ...]:
-    projected_trajectories: list[tuple[tuple[float, float], ...]] = []
-    for trajectory in trajectories:
-        points = np.asarray(trajectory, dtype=np.float32)
-        camera_points = transform_points(points, camera_from_base)
-        projected, _ = project_points(camera_points, intrinsics)
-        if len(projected) < 2:
-            continue
-        projected_trajectories.append(
-            tuple((float(point[0]), float(point[1])) for point in projected)
-        )
-    return tuple(projected_trajectories)
-
-
-def draw_projected_policy_trajectories(
-    canvas: np.ndarray,
-    trajectories: tuple[tuple[tuple[float, float], ...], ...],
-    source_width: float,
-    source_height: float,
-    pickup_steps: tuple[int, ...] = (),
-) -> None:
-    scale = min(
-        canvas.shape[1] / source_width,
-        canvas.shape[0] / source_height,
-    )
-    offset = np.asarray(
-        (
-            (canvas.shape[1] - source_width * scale) * 0.5,
-            (canvas.shape[0] - source_height * scale) * 0.5,
-        ),
-        dtype=np.float32,
-    )
-    pickup_pixels: list[tuple[int, int, tuple[int, int, int]]] = []
-    for index, trajectory in enumerate(trajectories):
-        if len(trajectory) < 2:
-            continue
-        color = POLICY_COLORS[index % len(POLICY_COLORS)]
-        pixels = np.rint(np.asarray(trajectory) * scale + offset).astype(np.int32)
-        shadow = pixels + (3, 4)
-        dark = tuple(round(channel * 0.22) for channel in color)
-        highlight = tuple(min(255, channel + 105) for channel in color)
-        cv2.polylines(canvas, [shadow], False, (2, 4, 7), 11, cv2.LINE_AA)
-        cv2.polylines(canvas, [pixels], False, dark, 10, cv2.LINE_AA)
-        cv2.polylines(canvas, [pixels], False, color, 7, cv2.LINE_AA)
-        cv2.polylines(
-            canvas,
-            [pixels + (-1, -1)],
-            False,
-            highlight,
-            2,
-            cv2.LINE_AA,
-        )
-        cv2.circle(canvas, tuple(pixels[0]), 6, (235, 241, 250), -1, cv2.LINE_AA)
-        cv2.circle(canvas, tuple(pixels[-1]), 7, dark, 3, cv2.LINE_AA)
-        cv2.circle(canvas, tuple(pixels[-1]), 5, color, -1, cv2.LINE_AA)
-        if index < len(pickup_steps) and pickup_steps[index] < len(pixels):
-            pickup = tuple(pixels[pickup_steps[index]])
-            pickup_pixels.append((pickup[0], pickup[1], color))
-    if not pickup_pixels:
-        return
-    for column, row, color in pickup_pixels:
-        cv2.circle(canvas, (column, row), 10, (2, 4, 7), -1, cv2.LINE_AA)
-        cv2.circle(canvas, (column, row), 7, (245, 249, 255), 2, cv2.LINE_AA)
-        cv2.circle(canvas, (column, row), 4, color, -1, cv2.LINE_AA)
-    pickup_center = np.rint(
-        np.asarray([(point[0], point[1]) for point in pickup_pixels]).mean(axis=0)
-    ).astype(int)
-    label_position = (int(pickup_center[0]) + 12, int(pickup_center[1]) - 10)
-    cv2.putText(
-        canvas,
-        "PICKUP",
-        (label_position[0] + 1, label_position[1] + 1),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        (2, 4, 7),
-        3,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        canvas,
-        "PICKUP",
-        label_position,
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
-        (30, 220, 255),
-        1,
-        cv2.LINE_AA,
-    )
-
-
 def render_shared_cloud(
     viewpoint: str,
     background_rgb: np.ndarray,
@@ -887,8 +788,6 @@ def render_shared_cloud(
     trim_percent: float,
     box_corners_top: np.ndarray | None,
     gripper_marker: tuple[float, float, float] | None,
-    policy_trajectories: tuple[tuple[tuple[float, float], ...], ...],
-    pickup_steps: tuple[int, ...],
 ) -> np.ndarray:
     if not len(top_points) and not len(left_points):
         return empty_render(viewpoint, "No valid tracked depth points")
@@ -920,13 +819,6 @@ def render_shared_cloud(
     rasterize_points(labels, blue_projected, intrinsics, 1)
     rasterize_points(labels, red_projected, intrinsics, 2)
     blend_point_labels(canvas, labels)
-    draw_projected_policy_trajectories(
-        canvas,
-        policy_trajectories,
-        float(intrinsics["width"]),
-        float(intrinsics["height"]),
-        pickup_steps,
-    )
     if box_corners is not None:
         draw_camera_box(canvas, box_corners, intrinsics)
     draw_gripper_marker(
@@ -1382,27 +1274,6 @@ def draw_scene_box(
     )
 
 
-def draw_scene_policy_trajectories(
-    canvas: np.ndarray,
-    projection: SceneProjection,
-    trajectories: tuple[tuple[tuple[float, float, float], ...], ...],
-    pickup_steps: tuple[int, ...],
-) -> None:
-    projected_trajectories: list[tuple[tuple[float, float], ...]] = []
-    for trajectory in trajectories:
-        pixels, _ = project_scene(np.asarray(trajectory, dtype=np.float32), projection)
-        projected_trajectories.append(
-            tuple((float(point[0]), float(point[1])) for point in pixels)
-        )
-    draw_projected_policy_trajectories(
-        canvas,
-        tuple(projected_trajectories),
-        float(canvas.shape[1]),
-        float(canvas.shape[0]),
-        pickup_steps,
-    )
-
-
 def render_oblique_scene(
     top_points_base: np.ndarray,
     top_total: int,
@@ -1421,8 +1292,6 @@ def render_oblique_scene(
     robot_calibration_label: str,
     trim_percent: float,
     obstacle_box: ObstacleBox | None,
-    policy_trajectories: tuple[tuple[tuple[float, float, float], ...], ...],
-    pickup_steps: tuple[int, ...],
 ) -> np.ndarray:
     canvas = np.full((480, 640, 3), (8, 11, 16), dtype=np.uint8)
     draw_table_grid(canvas, projection)
@@ -1475,12 +1344,6 @@ def render_oblique_scene(
     canvas[labels == 1] = (255, 82, 38)
     canvas[labels == 2] = (38, 67, 255)
     canvas[labels == 3] = (236, 82, 236)
-    draw_scene_policy_trajectories(
-        canvas,
-        projection,
-        policy_trajectories,
-        pickup_steps,
-    )
     if obstacle_box is not None:
         draw_scene_box(canvas, projection, obstacle_box)
     draw_transform_axes(
@@ -1659,26 +1522,6 @@ class PointCloudStream:
                 left_rgb = cast(np.ndarray, left_sample["rgb"])
                 top_intrinsics = cast(dict[str, Any], top_sample["intrinsics"])
                 left_intrinsics = cast(dict[str, Any], left_sample["intrinsics"])
-                policy_trajectories = self.live_state.policy_trajectories()
-                pickup_steps = self.live_state.policy_pickup_steps()
-                top_policy_trajectories = project_policy_trajectories(
-                    policy_trajectories,
-                    self.top_from_base,
-                    top_intrinsics,
-                )
-                left_policy_trajectories = project_policy_trajectories(
-                    policy_trajectories,
-                    self.left_from_base,
-                    left_intrinsics,
-                )
-                self.live_state.publish_camera_trajectories(
-                    "top",
-                    top_policy_trajectories,
-                )
-                self.live_state.publish_camera_trajectories(
-                    "left",
-                    left_policy_trajectories,
-                )
                 top_gripper_marker = project_gripper_marker(
                     base_from_gripper,
                     self.top_from_base,
@@ -1784,8 +1627,6 @@ class PointCloudStream:
                     trim_percent,
                     box_corners_top,
                     top_gripper_marker,
-                    top_policy_trajectories,
-                    pickup_steps,
                 )
                 left_render = render_shared_cloud(
                     "left",
@@ -1803,8 +1644,6 @@ class PointCloudStream:
                     trim_percent,
                     box_corners_top,
                     left_gripper_marker,
-                    left_policy_trajectories,
-                    pickup_steps,
                 )
                 scene_render = render_oblique_scene(
                     top_points_base,
@@ -1824,8 +1663,6 @@ class PointCloudStream:
                     self.robot_calibration_label,
                     trim_percent,
                     self.obstacle_box,
-                    policy_trajectories,
-                    pickup_steps,
                 )
             except Exception as error:
                 top_render = empty_render("top", f"Point-cloud error: {error}")

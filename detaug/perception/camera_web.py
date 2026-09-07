@@ -20,8 +20,6 @@ FILES = {
     "left_mask.png": "image/png",
 }
 REFERENCE_FILES = {"top_reference.png", "left_reference.png"}
-Trajectory3D = tuple[tuple[float, float, float], ...]
-Trajectory2D = tuple[tuple[float, float], ...]
 
 
 class LiveState:
@@ -34,11 +32,6 @@ class LiveState:
         self.gripper_markers: dict[str, tuple[float, float, float]] = {}
         self.camera_boxes: dict[str, tuple[tuple[float, float], ...]] = {}
         self.robot_state_data: tuple[float, ...] | None = None
-        self.policy_trajectories_data: tuple[Trajectory3D, ...] = ()
-        self.policy_pickup_steps_data: tuple[int, ...] = ()
-        self.camera_trajectories_data: dict[str, tuple[Trajectory2D, ...]] = {}
-        self.policy_status_data: dict[str, object] = {"state": "waiting"}
-        self.policy_trajectories_visible = True
         self.status = b'{"running":false,"updated_at":0,"cameras":{}}'
         self.realign_requested = False
         self.trim_percent = 40.0
@@ -133,55 +126,6 @@ class LiveState:
                     return None
                 self.condition.wait(remaining)
             return self.robot_state_data
-
-    def publish_policy_trajectories(
-        self,
-        trajectories: tuple[Trajectory3D, ...],
-        pickup_steps: tuple[int, ...] = (),
-    ) -> None:
-        with self.condition:
-            self.policy_trajectories_data = trajectories
-            self.policy_pickup_steps_data = pickup_steps
-
-    def policy_trajectories(self) -> tuple[Trajectory3D, ...]:
-        with self.condition:
-            if not self.policy_trajectories_visible:
-                return ()
-            return self.policy_trajectories_data
-
-    def set_policy_trajectories_visible(self, visible: bool) -> None:
-        with self.condition:
-            self.policy_trajectories_visible = visible
-
-    def policy_trajectory_visibility(self) -> bool:
-        with self.condition:
-            return self.policy_trajectories_visible
-
-    def policy_pickup_steps(self) -> tuple[int, ...]:
-        with self.condition:
-            if not self.policy_trajectories_visible:
-                return ()
-            return self.policy_pickup_steps_data
-
-    def publish_camera_trajectories(
-        self,
-        name: str,
-        trajectories: tuple[Trajectory2D, ...],
-    ) -> None:
-        with self.condition:
-            self.camera_trajectories_data[name] = trajectories
-
-    def camera_trajectories(self, name: str) -> tuple[Trajectory2D, ...]:
-        with self.condition:
-            return self.camera_trajectories_data.get(name, ())
-
-    def publish_policy_status(self, status: Mapping[str, object]) -> None:
-        with self.condition:
-            self.policy_status_data = dict(status)
-
-    def policy_status(self) -> dict[str, object]:
-        with self.condition:
-            return dict(self.policy_status_data)
 
     def status_bytes(self) -> bytes:
         with self.condition:
@@ -279,7 +223,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
-.recalibrate, .trajectory-toggle {
+.recalibrate {
   height: 30px;
   padding: 0 12px;
   border: 1px solid #334154;
@@ -291,18 +235,13 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
   font-weight: 650;
   cursor: pointer;
 }
-.recalibrate:hover, .trajectory-toggle:hover {
+.recalibrate:hover {
   border-color: #51d88a;
   color: #edf8f1;
 }
-.recalibrate:disabled, .trajectory-toggle:disabled {
+.recalibrate:disabled {
   cursor: wait;
   opacity: 0.55;
-}
-.trajectory-toggle.active {
-  border-color: #51d88a;
-  background: #10231b;
-  color: #77eaa7;
 }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #687385; }
 .dot.live { background: #51d88a; box-shadow: 0 0 12px #51d88a88; }
@@ -593,8 +532,6 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
       <input id="outlier-trim" type="range" min="0" max="50"
         step="1" value="40">
       <output id="outlier-value">40%</output></div>
-    <button class="trajectory-toggle active" id="trajectory-toggle">
-      Hide demo paths</button>
     <button class="recalibrate" id="recalibrate">Recalibrate</button>
     <div class="overall"><span class="dot" id="overall-dot"></span>
       <span id="overall-text">Waiting for tracker</span></div>
@@ -628,7 +565,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
     <article class="tile">
       <div class="tile-head"><span class="tile-title">
         Shared 3D scene · right robot base</span>
-        <span class="tile-tag" id="policy-metrics">Waiting for policy</span></div>
+        <span class="tile-tag">Oblique projection</span></div>
       <div class="cloud-wrap"><img class="cloud-stream live-image"
         data-file="scene_cloud.jpg"></div>
     </article>
@@ -691,24 +628,6 @@ async function recalibrate() {
   }
 }
 
-async function togglePolicyTrajectories() {
-  const button = document.getElementById('trajectory-toggle');
-  const visible = !button.classList.contains('active');
-  button.disabled = true;
-  try {
-    const response = await fetch('/actions/policy-trajectories', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({visible}),
-    });
-    if (!response.ok) throw new Error('Request failed');
-    button.classList.toggle('active', visible);
-    button.textContent = visible ? 'Hide demo paths' : 'Show demo paths';
-  } finally {
-    button.disabled = false;
-  }
-}
-
 let outlierRequestTimer;
 
 function requestOutlierTrim() {
@@ -754,22 +673,6 @@ async function refreshStatus() {
       ? status.phase : 'Tracker offline';
     updateCamera('top', status.cameras?.top, fresh);
     updateCamera('left', status.cameras?.left, fresh);
-    const policy = status.policy;
-    const policyMetrics = document.getElementById('policy-metrics');
-    if (policy?.state === 'ready') {
-      const episodes = policy.episodes?.join('/') ?? '—';
-      const lengths = policy.lengths?.join('/') ?? '—';
-      policyMetrics.textContent = `train episodes ${episodes} · ${lengths} steps`;
-    } else if (policy?.state === 'error') {
-      policyMetrics.textContent = 'Policy error';
-    } else {
-      policyMetrics.textContent = policy?.state ?? 'Waiting for policy';
-    }
-    const trajectoryToggle = document.getElementById('trajectory-toggle');
-    const trajectoriesVisible = status.policy_trajectories_visible ?? true;
-    trajectoryToggle.classList.toggle('active', trajectoriesVisible);
-    trajectoryToggle.textContent = trajectoriesVisible
-      ? 'Hide demo paths' : 'Show demo paths';
     const slider = document.getElementById('outlier-trim');
     if (document.activeElement !== slider) {
       const percentage = status.outlier_trim_percent ?? 0;
@@ -786,8 +689,6 @@ refreshImages();
 refreshTargets();
 refreshStatus();
 document.getElementById('recalibrate').addEventListener('click', recalibrate);
-document.getElementById('trajectory-toggle').addEventListener(
-  'click', togglePolicyTrajectories);
 document.getElementById('outlier-trim').addEventListener('input', requestOutlierTrim);
 setInterval(refreshImages, 200);
 setInterval(refreshStatus, 800);
@@ -852,22 +753,6 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/actions/recalibrate":
             self.server.live_state.request_realign()
             self.send_bytes(b'{"accepted":true}', "application/json")
-            return
-        if path == "/actions/policy-trajectories":
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-                payload = json.loads(self.rfile.read(length))
-                visible = payload["visible"]
-                if not isinstance(visible, bool):
-                    raise ValueError
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid visibility")
-                return
-            self.server.live_state.set_policy_trajectories_visible(visible)
-            self.send_bytes(
-                json.dumps({"visible": visible}).encode(),
-                "application/json",
-            )
             return
         if path == "/actions/outlier-trim":
             try:
