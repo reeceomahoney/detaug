@@ -4,7 +4,6 @@ import argparse
 import importlib
 import io
 import os
-import socket
 import threading
 import time
 import uuid
@@ -963,7 +962,7 @@ def main() -> None:
             args.bind,
             args.port,
         )
-        print(f"Open http://{socket.gethostname()}:{args.port}")
+        print(f"Open http://localhost:{args.port}")
     board = StatusBoard(live_state)
     cameras = {
         "top": CameraCapture(

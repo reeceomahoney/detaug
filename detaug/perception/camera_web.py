@@ -42,6 +42,7 @@ class LiveState:
         self.status = b'{"running":false,"updated_at":0,"cameras":{}}'
         self.realign_requested = False
         self.trim_percent = 40.0
+        self.obstacle_data: dict[str, object] | None = None
 
     def publish_image(self, name: str, payload: bytes) -> None:
         with self.condition:
@@ -185,6 +186,16 @@ class LiveState:
     def status_bytes(self) -> bytes:
         with self.condition:
             return self.status
+
+    def publish_obstacle(self, payload: Mapping[str, object] | None) -> None:
+        with self.condition:
+            self.obstacle_data = None if payload is None else dict(payload)
+            self.condition.notify_all()
+
+    def obstacle_bytes(self) -> bytes:
+        with self.condition:
+            payload = self.obstacle_data
+        return json.dumps(payload or {"box": None, "stamp": 0.0}).encode()
 
     def request_realign(self) -> None:
         with self.condition:
@@ -806,6 +817,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/status.json":
             self.send_bytes(self.server.live_state.status_bytes(), "application/json")
+            return
+        if path == "/obstacle.json":
+            self.send_bytes(self.server.live_state.obstacle_bytes(), "application/json")
             return
         if path.startswith("/stream/"):
             name = path.removeprefix("/stream/")

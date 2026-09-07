@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -464,6 +465,34 @@ def obstacle_box_corners(
                 + height * projection.table_normal
             )
     return np.asarray(corners, np.float32)
+
+
+def obstacle_payload(
+    corners: np.ndarray | None,
+    points: np.ndarray,
+    box: ObstacleBox | None,
+    max_points: int,
+) -> dict[str, object]:
+    """The smoothed obstacle as an axis-aligned box in the piper base frame, the
+    form the selector scores against. The table frame is levelled against the
+    same base frame, so the corners are already near-axis-aligned and their
+    bounds lose almost nothing."""
+    if corners is None or box is None:
+        return {"box": None, "cloud": [], "stamp": time.time()}
+    low = corners.min(axis=0)
+    high = corners.max(axis=0)
+    center = (low + high) * 0.5
+    half = (high - low) * 0.5
+    cloud = points
+    if len(cloud) > max_points:
+        cloud = cloud[np.linspace(0, len(cloud) - 1, max_points, dtype=np.int64)]
+    return {
+        "box": [round(float(v), 5) for v in (*center, *half)],
+        "cloud": np.round(cloud, 4).tolist(),
+        "points_used": int(box.points_used),
+        "top": round(float(box.top), 5),
+        "stamp": time.time(),
+    }
 
 
 def project_points(
@@ -1535,9 +1564,11 @@ class PointCloudStream:
         top_serial: str,
         left_serial: str,
         can_interface: str,
+        cloud_publish_points: int = 1500,
     ):
         self.live_state = live_state
         self.jpeg_quality = jpeg_quality
+        self.cloud_publish_points = cloud_publish_points
         self.top_from_left, self.calibration_label = load_calibration(
             calibration_path,
             top_serial,
@@ -1702,6 +1733,14 @@ class PointCloudStream:
                     else obstacle_box_corners(
                         self.obstacle_box,
                         self.scene_projection,
+                    )
+                )
+                self.live_state.publish_obstacle(
+                    obstacle_payload(
+                        box_corners_base,
+                        np.vstack((top_points_base, left_points_base)),
+                        self.obstacle_box,
+                        self.cloud_publish_points,
                     )
                 )
                 box_corners_top = (
