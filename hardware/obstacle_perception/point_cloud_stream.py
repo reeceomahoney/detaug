@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,8 +10,6 @@ from typing import Any, cast
 import cv2
 import numpy as np
 from camera_web import LiveState
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -150,18 +147,7 @@ def transform_from_rpy(rpy: np.ndarray, translation: np.ndarray) -> np.ndarray:
 
 
 def import_piper_sdk() -> Any:
-    try:
-        return importlib.import_module("piper_sdk")
-    except ModuleNotFoundError:
-        site_packages = sorted(
-            (REPO_ROOT / ".pixi" / "envs" / "default" / "lib").glob(
-                "python*/site-packages"
-            )
-        )
-        if not site_packages:
-            raise RuntimeError("Piper SDK is unavailable") from None
-        sys.path.append(str(site_packages[-1]))
-        return importlib.import_module("piper_sdk")
+    return importlib.import_module("piper_sdk")
 
 
 class PiperPoseReader:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from pathlib import Path
@@ -9,20 +8,8 @@ from typing import Any
 import numpy as np
 from camera_web import LiveState, Trajectory3D
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_ID = "reece-omahoney/pick-and-place"
 DATASET_FILE = "data/chunk-000/file-000.parquet"
-
-
-def add_pixi_site_packages() -> None:
-    site_packages = sorted(
-        (REPO_ROOT / ".pixi" / "envs" / "default" / "lib").glob("python*/site-packages")
-    )
-    if not site_packages:
-        raise RuntimeError("The repository Pixi environment is unavailable")
-    path = str(site_packages[-1])
-    if path not in sys.path:
-        sys.path.append(path)
 
 
 def recorded_joint_trajectories(
@@ -102,7 +89,6 @@ class DemoTrajectoryStream:
 
     def run(self) -> None:
         try:
-            add_pixi_site_packages()
             self.publish_status("loading recorded training demos")
             started = time.perf_counter()
             actions, episode_indices, pickup_steps = recorded_joint_trajectories(

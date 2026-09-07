@@ -4,7 +4,6 @@ import argparse
 import importlib
 import json
 import os
-import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -26,7 +25,6 @@ from calibrate_cameras import (
 
 TOP_CAMERA_SERIAL = "323622271046"
 OUTPUT_PATH = Path(__file__).resolve().parent / "calibration" / "base_from_top.json"
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -155,20 +153,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def import_piper_sdk() -> Any:
-    try:
-        return importlib.import_module("piper_sdk")
-    except ModuleNotFoundError:
-        site_packages = sorted(
-            (REPO_ROOT / ".pixi" / "envs" / "default" / "lib").glob(
-                "python*/site-packages"
-            )
-        )
-        if not site_packages:
-            raise RuntimeError(
-                "Piper SDK is unavailable. Run `pixi install` in the repository."
-            ) from None
-        sys.path.append(str(site_packages[-1]))
-        return importlib.import_module("piper_sdk")
+    return importlib.import_module("piper_sdk")
 
 
 def destroy_windows() -> None:
