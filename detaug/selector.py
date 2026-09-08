@@ -327,6 +327,8 @@ PIPER_FRAMES = ["base_link", "link1", "link2", "link3", "link4", "link5", "link6
 PIPER_TIP = 0.1358
 PIPER_RADIUS = 0.045
 PIPER_SEGMENT_POINTS = 8
+PIPER_CAMERA = ((-0.045, 0.0, 0.09), (-0.095, 0.0, 0.11))
+PIPER_CAMERA_RADIUS = 0.035
 
 
 class PiperCollision:
@@ -343,6 +345,8 @@ class PiperCollision:
         radius: float = PIPER_RADIUS,
         tip: float = PIPER_TIP,
         n: int = PIPER_SEGMENT_POINTS,
+        camera=PIPER_CAMERA,
+        camera_radius: float = PIPER_CAMERA_RADIUS,
     ):
         self.device = device
         self.chain = build_piper_chain(device)
@@ -353,6 +357,20 @@ class PiperCollision:
             (PIPER_FRAMES.index(a), PIPER_FRAMES.index(b)) for a, b in PIPER_SEGMENTS
         ]
         self.t = torch.linspace(0.0, 1.0, n, device=device)[:, None]
+        self.camera = (
+            torch.as_tensor(camera, dtype=torch.float32, device=device)
+            if camera is not None and camera_radius > 0
+            else None
+        )
+        self.camera_radius = camera_radius
+        n_cam = 0 if self.camera is None else n
+        n_arm = n * (len(self.pairs) + 1)
+        self.radii = torch.cat(
+            [
+                torch.full((n_cam,), camera_radius, device=device),
+                torch.full((n_arm,), radius, device=device),
+            ]
+        )
 
     def frames(self, q: Tensor) -> Tensor:
         fk = self.chain.forward_kinematics(q, end_only=False)
@@ -362,6 +380,13 @@ class PiperCollision:
         m = mats[:, -1]
         return m[:, :3, 3] + self.tip * m[:, :3, 2]
 
+    def camera_points(self, mats: Tensor) -> Tensor:
+        assert self.camera is not None
+        m = mats[:, -1]
+        ends = m[:, :3, :3] @ self.camera.T + m[:, :3, 3:]
+        a, b = ends[:, :, 0], ends[:, :, 1]
+        return a[:, None] + self.t * (b - a)[:, None]
+
     def arm_points(self, q: Tensor) -> Tensor:
         """q (m, 6) radians -> (m, K, 3) collision points in the base frame."""
         mats = self.frames(q)
@@ -369,6 +394,8 @@ class PiperCollision:
         ends = [(o[:, a], o[:, b]) for a, b in self.pairs]
         ends.append((o[:, -1], self.tip_point(mats)))
         pts = [a[:, None] + self.t * (b - a)[:, None] for a, b in ends]
+        if self.camera is not None:
+            pts.insert(0, self.camera_points(mats))
         return torch.cat(pts, dim=1) + self.base_pos
 
     def held_point(self, q: Tensor, offset: float) -> Tensor:
@@ -394,10 +421,13 @@ class PiperSelector:
         hold_offset: float = 0.0,
         grip_closed: float = 1.5,
         radius: float = PIPER_RADIUS,
+        camera_radius: float = PIPER_CAMERA_RADIUS,
     ):
         f32 = {"dtype": torch.float32, "device": device}
         self.device = device
-        self.fc = PiperCollision(device, base_pos, radius=radius)
+        self.fc = PiperCollision(
+            device, base_pos, radius=radius, camera_radius=camera_radius
+        )
         self.jm = torch.as_tensor(act_stats["mean"], **f32)[:n_arm]
         self.js = torch.as_tensor(act_stats["std"], **f32)[:n_arm]
         self.sm = torch.as_tensor(obs_stats["mean"], **f32)[:n_arm]
@@ -440,7 +470,7 @@ class PiperSelector:
             flat = q.reshape(-1, n).float()
             pts = self.fc.arm_points(flat).reshape(b, t, -1, 3)
             d = self.dist(pts, box)
-            worst.append((d - self.fc.radius).amin(dim=2))
+            worst.append((d - self.fc.radii).amin(dim=2))
             if self.hold > 0:
                 held = self.fc.held_point(flat, self.hold_offset).reshape(b, t, 3)
                 grip = traj[..., self.joint_start + n] * self.gs + self.gm

@@ -17,6 +17,34 @@ def test_tip_reaches_past_link6():
     assert abs(float((pts[0, -1] - p6).norm()) - fc.tip) < 1e-5
 
 
+def test_camera_rides_above_the_gripper():
+    fc = PiperCollision("cpu")
+    q = torch.zeros(1, 6)
+    mats = fc.frames(q)
+    p6 = mats[0, -1, :3, 3]
+    pts = fc.arm_points(q)
+    assert pts.shape[1] == len(fc.radii)
+    cam = pts[0, : len(fc.t)]
+    assert torch.allclose(fc.radii[: len(fc.t)], torch.full((len(fc.t),), 0.035))
+    local = (cam - p6) @ mats[0, -1, :3, :3]
+    assert torch.allclose(local[0], torch.tensor([-0.045, 0.0, 0.09]), atol=1e-5)
+    assert torch.allclose(local[-1], torch.tensor([-0.095, 0.0, 0.11]), atol=1e-5)
+    assert (cam[:, 2] > p6[2] + 0.04).all()
+    bare = PiperCollision("cpu", camera_radius=0.0)
+    assert bare.arm_points(q).shape[1] == pts.shape[1] - len(fc.t)
+
+
+def test_camera_is_scored():
+    sel = PiperSelector(STATS, STATS, joint_start=7, device="cpu")
+    traj = torch.zeros(1, 5, 14)
+    cam = sel.fc.arm_points(torch.zeros(1, 6))[0, len(sel.fc.t) - 1].numpy()
+    sel.set_boxes([*cam, 0.01, 0.01, 0.01])
+    assert abs(sel.score(traj).item() - 5 * (0.035 + 0.01)) < 1e-3
+    bare = PiperSelector(STATS, STATS, joint_start=7, device="cpu", camera_radius=0.0)
+    bare.set_boxes([*cam, 0.01, 0.01, 0.01])
+    assert bare.score(traj).item() == 0.0
+
+
 def test_score_is_penetration_depth():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     sel = PiperSelector(STATS, STATS, joint_start=7, device=dev)

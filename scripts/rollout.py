@@ -33,6 +33,7 @@ class DetAugConfig:
     bend_max: float = 1.0
     collision: str = "box"  # selector geometry: "box" or "pointcloud"
     radius: float = 0.045  # arm capsule radius
+    camera_radius: float = 0.035
     margin: float = 0.0  # inflate the obstacle box by this much
     hold: float = 0.0  # >0: held-object sphere radius past the fingertips
     hold_offset: float = 0.0  # held sphere centre past the fingertips
@@ -272,6 +273,7 @@ def attach_selector(ctx, cfg: DetAugConfig):
         hold=cfg.hold,
         hold_offset=cfg.hold_offset,
         radius=cfg.radius,
+        camera_radius=cfg.camera_radius,
     )
 
     client = ObstacleClient(cfg.obstacle_url)
@@ -338,7 +340,7 @@ def attach_selector(ctx, cfg: DetAugConfig):
         fresh = refresh()
         s = sel.score(traj)
         v = s.detach().cpu().numpy()
-        trace["box"].append(sel.box.reshape(-1, 6)[0].cpu().numpy())
+        trace["box"].append(sel.box.reshape(-1, sel.box.shape[-1])[0].cpu().numpy())
         trace["labels"].append(drawn["c"].cpu().numpy())
         trace["costs"].append(v)
         trace["fresh"].append(fresh)
@@ -442,6 +444,7 @@ def attach_selector(ctx, cfg: DetAugConfig):
             "n_action_steps": np.asarray(policy.config.n_action_steps),
             "state_dim": np.asarray(policy.state_dim),
             "radius": np.asarray(cfg.radius),
+            "camera_radius": np.asarray(cfg.camera_radius),
             "margin": np.asarray(cfg.margin),
         }
         for key in (OBS_STATE, ACTION):

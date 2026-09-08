@@ -25,6 +25,7 @@ detaug:
   n_cond: 8
   collision: box
   radius: 0.045
+  camera_radius: 0.035
   margin: 0.02
   hold: 0.0
   deviation: 0.0
