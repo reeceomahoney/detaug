@@ -1108,7 +1108,9 @@ def run_calibration(args: argparse.Namespace) -> None:
     pose_reader = PiperPoseReader(args.can_interface)
     window = f"Robot frame calibration | top camera + {args.arm} arm"
     try:
-        pipeline, top_intrinsics = start_camera(rs, args.top_serial, args)
+        pipeline, top_intrinsics = start_camera(
+            rs, args.top_serial, args.width, args.height, args.fps
+        )
         top_matrix, top_distortion = intrinsics_values(top_intrinsics)
         pose_reader.connect()
         cv2.namedWindow(window, cv2.WINDOW_NORMAL)
