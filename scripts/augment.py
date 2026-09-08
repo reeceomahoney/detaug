@@ -953,8 +953,8 @@ def lag_states(x, chain, base, alpha):
 
 
 def augment_piper(cfg):
-    # ponytail: carry-phase bends only, IK error + jerk as the only filters;
-    # phase-wide bends and a self-collision check are the upgrades
+    # ponytail: approach + carry bends, IK error + jerk as the only filters;
+    # a self-collision check is the upgrade
     assert isinstance(cfg.env, PiperConfig)
     rng = np.random.default_rng(cfg.seed)
     chain = build_piper_chain(DEV)
@@ -973,7 +973,7 @@ def augment_piper(cfg):
             "names": None,
         },
         "action": {"dtype": "float32", "shape": act_all.shape[1:], "names": None},
-        "bend": {"dtype": "float32", "shape": (2,), "names": None},
+        "bend": {"dtype": "float32", "shape": (4,), "names": None},
     }
     dst = LeRobotDataset.create(
         repo_id=cfg.dst_repo, fps=src.fps, features=features, use_videos=False
@@ -992,10 +992,13 @@ def augment_piper(cfg):
     for e in tqdm(range(n_src), desc="originals"):
         sel = epi == e
         obs, act = obs_all[sel].copy(), act_all[sel].copy()
-        write(dst, obs, act, np.zeros(2))
+        write(dst, obs, act, np.zeros(4))
         grid += track_error(obs[:, arm], act[:, arm]) / n_src
         seg = carry_segment(act[:, 6], cfg.env.gripper_closed)
         if seg is None or seg[1] - seg[0] < 2 * margin:
+            continue
+        opn = int((act[: seg[0], 6] >= cfg.env.gripper_closed).argmax())
+        if seg[0] - margin - opn < 4:
             continue
         ee, quat = fk(chain, np.radians(act[:, arm]), base)
         obs_ee = fk(chain, np.radians(obs[:, arm]), base)[0]
@@ -1003,6 +1006,7 @@ def augment_piper(cfg):
             dict(
                 obs=obs,
                 act=act,
+                opn=opn,
                 close=seg[0],
                 opened=seg[1],
                 ee=ee,
@@ -1026,13 +1030,20 @@ def augment_piper(cfg):
         if not pending:
             break
         bar.write(f"attempt {attempt}: {len(pending)} pending")
-        phis = np.pi * rng.uniform(cfg.bend_min, cfg.bend_max, len(pending))
-        thetas = rng.uniform(0.0, np.pi, len(pending))
+        phis = np.pi * rng.uniform(cfg.bend_min, cfg.bend_max, (len(pending), 2))
+        thetas = rng.uniform(0.0, np.pi, (len(pending), 2))
         for x, phi, theta in zip(pending, phis, thetas):
-            d = bend_delta(
-                x["obs_ee"], x["close"] + margin, x["opened"] - margin, phi, theta
+            segs = [
+                (x["opn"], x["close"] - margin),
+                (x["close"] + margin, x["opened"] - margin),
+            ]
+            d = sum(
+                bend_delta(x["obs_ee"], s0, s1, p, t)
+                for (s0, s1), p, t in zip(segs, phi, theta)
             )
-            x["label"] = phi * np.array([np.cos(theta), np.sin(theta)])
+            x["label"] = (
+                phi[:, None] * np.stack([np.cos(theta), np.sin(theta)], 1)
+            ).ravel()
             x["ee_t"] = x["ee"] + d
             x["bent"] = np.linalg.norm(d, axis=1) > 1e-6
 
