@@ -23,9 +23,20 @@ SELF_STRIDE = 4
 SELF_GAP = 0.01
 
 
-def box_sdf(points: Tensor, center: Tensor, half_extents) -> Tensor:
+def box_sdf(points: Tensor, center: Tensor, half_extents, yaw=None) -> Tensor:
     """Signed distance from points (..., d) to an axis-aligned box."""
-    q = (points - center).abs() - half_extents
+    offset = points - center
+    if yaw is not None:
+        cos, sin = torch.cos(yaw), torch.sin(yaw)
+        offset = torch.cat(
+            [
+                offset[..., :1] * cos + offset[..., 1:2] * sin,
+                offset[..., 1:2] * cos - offset[..., :1] * sin,
+                offset[..., 2:],
+            ],
+            dim=-1,
+        )
+    q = offset.abs() - half_extents
     outside = q.clamp(min=0.0).norm(dim=-1)
     inside = q.amax(dim=-1).clamp(max=0.0)
     return outside + inside
@@ -38,9 +49,15 @@ def obstacle_dist(points: Tensor, box: Tensor, cloud: Tensor | None) -> Tensor:
         if box.dim() == 2:
             box = box[:, None]
         shape = (len(box),) + (1,) * (points.dim() - 2) + (3,)
+        yaw_shape = shape[:-1] + (1,)
         return torch.stack(
             [
-                box_sdf(points, box[:, k, :3].view(shape), box[:, k, 3:].view(shape))
+                box_sdf(
+                    points,
+                    box[:, k, :3].view(shape),
+                    box[:, k, 3:6].view(shape),
+                    box[:, k, 6].view(yaw_shape) if box.shape[-1] > 6 else None,
+                )
                 for k in range(box.shape[1])
             ]
         ).amin(dim=0)
@@ -191,7 +208,8 @@ class AnalyticSelector:
         f32 = {"dtype": torch.float32, "device": device}
         self.device = device
         self.fc = FrankaCollision(device, base_pos, cube_size)
-        self.box = torch.as_tensor(box, **f32).view(-1, 6)[:, None]
+        box_tensor = torch.as_tensor(box, **f32)
+        self.box = box_tensor.view(-1, box_tensor.shape[-1])[:, None]
         self.cloud = None if pointcloud is None else torch.as_tensor(pointcloud, **f32)
         self.jm = torch.as_tensor(joint_stats["mean"], **f32)[:n_arm]
         self.js = torch.as_tensor(joint_stats["std"], **f32)[:n_arm]
@@ -213,7 +231,7 @@ class AnalyticSelector:
     def set_boxes(self, boxes):
         boxes = np.asarray(boxes, dtype=np.float32)
         t = torch.as_tensor(boxes, device=self.device)
-        self.box = t.reshape(-1, 6)[:, None] if t.dim() < 3 else t
+        self.box = t.reshape(-1, t.shape[-1])[:, None] if t.dim() < 3 else t
 
     @torch.no_grad()
     def score(self, traj: Tensor) -> Tensor:
@@ -394,7 +412,7 @@ class PiperSelector:
 
     def set_boxes(self, boxes):
         t = torch.as_tensor(np.asarray(boxes, np.float32), device=self.device)
-        self.box = t.reshape(-1, 6)[:, None] if t.dim() < 3 else t
+        self.box = t.reshape(-1, t.shape[-1])[:, None] if t.dim() < 3 else t
 
     def set_cloud(self, points):
         self.cloud = (

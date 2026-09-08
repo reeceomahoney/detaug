@@ -90,7 +90,7 @@ def diagnose(
 ) -> str | None:
     if box is None:
         return "no obstacle box published"
-    half = box[3:]
+    half = box[3:6]
     if float(half[:2].max()) > max_half:
         return (
             f"footprint {2 * half[0]:.3f} x {2 * half[1]:.3f} m exceeds "
@@ -307,7 +307,7 @@ def attach_selector(ctx, cfg: DetAugConfig):
         if box is None:
             return False
         box = box.copy()
-        box[3:] += cfg.margin
+        box[3:6] += cfg.margin
         sel.set_boxes(box)
         return True
 
@@ -415,9 +415,10 @@ def attach_selector(ctx, cfg: DetAugConfig):
     box = client.box()
     if box is not None:
         logger.info(
-            "obstacle box (base frame): centre %s half %s",
+            "obstacle box (base frame): centre %s half %s yaw %s",
             box[:3].round(3),
-            box[3:].round(3),
+            box[3:6].round(3),
+            box[6:].round(3),
         )
 
     def save():

@@ -34,7 +34,9 @@ class SceneProjection:
 class ObstacleBox:
     center_u: float
     center_v: float
-    side: float
+    size_u: float
+    size_v: float
+    yaw: float
     bottom: float
     top: float
     points_used: int
@@ -57,6 +59,40 @@ BOX_EDGES = (
 VISUAL_HULL_STEP = 0.005
 VISUAL_HULL_HALF_WIDTH = 0.12
 VISUAL_HULL_MAX_HEIGHT = 0.4
+SQUARE_FOOTPRINT_TOLERANCE = 0.015
+
+
+def wrap_yaw(yaw: float) -> float:
+    return float((yaw + np.pi / 2) % np.pi - np.pi / 2)
+
+
+def fit_footprint(
+    table_u: np.ndarray,
+    table_v: np.ndarray,
+    pad: float,
+) -> tuple[float, float, float, float, float]:
+    points = np.column_stack((table_u, table_v)).astype(np.float32)
+    rect = cv2.minAreaRect(points)
+    corners = cv2.boxPoints(rect)
+    edge_u = corners[1] - corners[0]
+    edge_v = corners[2] - corners[1]
+    length_u = float(np.hypot(*edge_u))
+    length_v = float(np.hypot(*edge_v))
+    if length_u < length_v:
+        edge_u, length_u, length_v = edge_v, length_v, length_u
+    center_u, center_v = (float(value) for value in rect[0])
+    if length_u - length_v < SQUARE_FOOTPRINT_TOLERANCE:
+        low_u, high_u = float(table_u.min()), float(table_u.max())
+        low_v, high_v = float(table_v.min()), float(table_v.max())
+        return (
+            (low_u + high_u) * 0.5,
+            (low_v + high_v) * 0.5,
+            high_u - low_u + pad,
+            high_v - low_v + pad,
+            0.0,
+        )
+    yaw = wrap_yaw(float(np.arctan2(edge_u[1], edge_u[0])))
+    return center_u, center_v, length_u + pad, length_v + pad, yaw
 
 
 def load_calibration(
@@ -225,8 +261,17 @@ def estimate_obstacle_box(
         return None
     low_u, high_u = np.percentile(table_u, (1.5, 98.5))
     low_v, high_v = np.percentile(table_v, (1.5, 98.5))
-    center_u = float(low_u + high_u) * 0.5
-    center_v = float(low_v + high_v) * 0.5
+    inside = (
+        (table_u >= low_u)
+        & (table_u <= high_u)
+        & (table_v >= low_v)
+        & (table_v <= high_v)
+    )
+    center_u, center_v, size_u, size_v, yaw = fit_footprint(
+        table_u[inside],
+        table_v[inside],
+        0.008,
+    )
     center_relative = center_points - projection.table_origin
     center_u_values = center_relative @ projection.table_x
     center_v_values = center_relative @ projection.table_y
@@ -241,10 +286,17 @@ def estimate_obstacle_box(
     if np.count_nonzero(center_valid) >= 100:
         center_u = float(np.median(center_u_values[center_valid]))
         center_v = float(np.median(center_v_values[center_valid]))
-    observed_side = max(float(high_u - low_u), float(high_v - low_v))
-    side = observed_side + 0.008
     top = float(np.percentile(heights, 99.0)) + 0.006
-    return ObstacleBox(center_u, center_v, side, 0.0, top, len(heights))
+    return ObstacleBox(
+        center_u,
+        center_v,
+        size_u,
+        size_v,
+        yaw,
+        0.0,
+        top,
+        len(heights),
+    )
 
 
 def clean_silhouette(mask: np.ndarray) -> np.ndarray:
@@ -397,18 +449,22 @@ def estimate_visual_hull_box(
     footprint_rows, footprint_columns = np.nonzero(footprint)
     if len(footprint_rows) < 16:
         return None
-    low_u = float(coordinates_u[footprint_rows].min() - VISUAL_HULL_STEP * 0.5)
-    high_u = float(coordinates_u[footprint_rows].max() + VISUAL_HULL_STEP * 0.5)
-    low_v = float(coordinates_v[footprint_columns].min() - VISUAL_HULL_STEP * 0.5)
-    high_v = float(coordinates_v[footprint_columns].max() + VISUAL_HULL_STEP * 0.5)
-    side = max(high_u - low_u, high_v - low_v)
+    center_u, center_v, size_u, size_v, yaw = fit_footprint(
+        coordinates_u[footprint_rows],
+        coordinates_v[footprint_columns],
+        VISUAL_HULL_STEP,
+    )
     top = float(heights[top_index] + VISUAL_HULL_STEP * 0.5)
-    if not 0.02 <= side <= 0.2 or not 0.04 <= top <= VISUAL_HULL_MAX_HEIGHT:
+    if not 0.02 <= min(size_u, size_v) or not max(size_u, size_v) <= 0.3:
+        return None
+    if not 0.04 <= top <= VISUAL_HULL_MAX_HEIGHT:
         return None
     return ObstacleBox(
-        (low_u + high_u) * 0.5,
-        (low_v + high_v) * 0.5,
-        side,
+        center_u,
+        center_v,
+        size_u,
+        size_v,
+        yaw,
         0.0,
         top,
         int(np.count_nonzero(occupancy[:, :, : top_index + 1])),
@@ -430,10 +486,14 @@ def smooth_obstacle_box(
     center_alpha = 0.65 if movement > 0.05 else 0.28
     size_alpha = 0.14
     height_alpha = 0.18
+    yaw_alpha = 0.2
+    yaw_step = wrap_yaw(current.yaw - previous.yaw)
     return ObstacleBox(
         previous.center_u + center_alpha * (current.center_u - previous.center_u),
         previous.center_v + center_alpha * (current.center_v - previous.center_v),
-        previous.side + size_alpha * (current.side - previous.side),
+        previous.size_u + size_alpha * (current.size_u - previous.size_u),
+        previous.size_v + size_alpha * (current.size_v - previous.size_v),
+        wrap_yaw(previous.yaw + yaw_alpha * yaw_step),
         0.0,
         previous.top + height_alpha * (current.top - previous.top),
         current.points_used,
@@ -444,15 +504,19 @@ def obstacle_box_corners(
     box: ObstacleBox,
     projection: SceneProjection,
 ) -> np.ndarray:
-    half = box.side * 0.5
+    half_u = box.size_u * 0.5
+    half_v = box.size_v * 0.5
+    cos_yaw, sin_yaw = np.cos(box.yaw), np.sin(box.yaw)
     corners = []
     for height in (box.bottom, box.top):
-        for table_u, table_v in (
-            (-half, -half),
-            (half, -half),
-            (half, half),
-            (-half, half),
+        for local_u, local_v in (
+            (-half_u, -half_v),
+            (half_u, -half_v),
+            (half_u, half_v),
+            (-half_u, half_v),
         ):
+            table_u = local_u * cos_yaw - local_v * sin_yaw
+            table_v = local_u * sin_yaw + local_v * cos_yaw
             corners.append(
                 projection.table_origin
                 + (box.center_u + table_u) * projection.table_x
@@ -474,15 +538,20 @@ def obstacle_payload(
     bounds lose almost nothing."""
     if corners is None or box is None:
         return {"box": None, "cloud": [], "stamp": time.time()}
-    low = corners.min(axis=0)
-    high = corners.max(axis=0)
-    center = (low + high) * 0.5
-    half = (high - low) * 0.5
+    center = corners.mean(axis=0)
+    edge_u = corners[1] - corners[0]
+    edge_v = corners[3] - corners[0]
+    half = (
+        float(np.linalg.norm(edge_u)) * 0.5,
+        float(np.linalg.norm(edge_v)) * 0.5,
+        float(corners[4:, 2].mean() - corners[:4, 2].mean()) * 0.5,
+    )
+    yaw = float(np.arctan2(edge_u[1], edge_u[0]))
     cloud = points
     if len(cloud) > max_points:
         cloud = cloud[np.linspace(0, len(cloud) - 1, max_points, dtype=np.int64)]
     return {
-        "box": [round(float(v), 5) for v in (*center, *half)],
+        "box": [round(float(v), 5) for v in (*center, *half, yaw)],
         "cloud": np.round(cloud, 4).tolist(),
         "points_used": int(box.points_used),
         "top": round(float(box.top), 5),
@@ -1264,7 +1333,7 @@ def draw_scene_box(
     pixel = scene_pixel(top_center, projection)
     cv2.putText(
         canvas,
-        f"{box.side * 100:.1f} x {box.side * 100:.1f} x {box.top * 100:.1f} cm",
+        f"{box.size_u * 100:.1f} x {box.size_v * 100:.1f} x {box.top * 100:.1f} cm",
         (pixel[0] + 7, pixel[1] - 7),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.34,

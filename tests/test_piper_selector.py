@@ -31,6 +31,18 @@ def test_score_is_penetration_depth():
     assert abs(sel.score(traj)[0].item() - 20 * (sel.fc.radius + half)) < 1e-3
 
 
+def test_yawed_box_rotates_its_extents():
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    sel = PiperSelector(STATS, STATS, joint_start=7, device=dev)
+    traj = torch.zeros(1, 1, 14, device=dev)
+    tip = sel.fc.arm_points(torch.zeros(1, 6, device=dev))[0, -1].cpu().numpy()
+    centre = tip + np.array([0.10, 0.0, 0.0], np.float32)
+    sel.set_boxes([*centre, 0.03, 0.10, 0.06])
+    assert sel.score(traj).item() == 0.0
+    sel.set_boxes([*centre, 0.03, 0.10, 0.06, np.pi / 2])
+    assert sel.score(traj).item() > 0.0
+
+
 def test_degrees_are_converted():
     sel = PiperSelector(
         {"mean": [90.0] * 6 + [0.0], "std": [1.0] * 7},
@@ -55,7 +67,7 @@ def test_cloud_geometry_matches_box_surface():
 
 
 def test_obstacle_payload_bounds_the_corners():
-    box = ObstacleBox(0.0, 0.0, 0.08, 0.0, 0.2, 500)
+    box = ObstacleBox(0.0, 0.0, 0.08, 0.08, 0.0, 0.0, 0.2, 500)
     corners = np.array(
         [
             [x, y, z]
@@ -65,13 +77,39 @@ def test_obstacle_payload_bounds_the_corners():
         np.float32,
     )
     payload = obstacle_payload(corners, np.zeros((0, 3), np.float32), box, 10)
-    assert payload["box"] == [0.0, 0.0, 0.1, 0.04, 0.04, 0.1]
+    assert payload["box"] == [0.0, 0.0, 0.1, 0.04, 0.04, 0.1, 0.0]
     assert obstacle_payload(None, corners, None, 10)["box"] is None
 
 
 def test_obstacle_payload_subsamples_the_cloud():
-    box = ObstacleBox(0.0, 0.0, 0.08, 0.0, 0.2, 500)
+    box = ObstacleBox(0.0, 0.0, 0.08, 0.08, 0.0, 0.0, 0.2, 500)
     corners = np.zeros((8, 3), np.float32)
     payload = obstacle_payload(corners, np.zeros((900, 3), np.float32), box, 100)
     cloud = payload["cloud"]
     assert isinstance(cloud, list) and len(cloud) == 100
+
+
+def test_fit_footprint_recovers_a_rotated_rectangle():
+    from detaug.perception.point_cloud_stream import fit_footprint
+
+    rng = np.random.default_rng(0)
+    local_u = rng.uniform(-0.10, 0.10, 4000)
+    local_v = rng.uniform(-0.04, 0.04, 4000)
+    angle = 0.6
+    table_u = 0.3 + local_u * np.cos(angle) - local_v * np.sin(angle)
+    table_v = -0.1 + local_u * np.sin(angle) + local_v * np.cos(angle)
+    center_u, center_v, size_u, size_v, yaw = fit_footprint(table_u, table_v, 0.0)
+    assert abs(center_u - 0.3) < 0.003 and abs(center_v + 0.1) < 0.003
+    assert abs(size_u - 0.20) < 0.005 and abs(size_v - 0.08) < 0.005
+    assert abs(yaw - angle) < 0.02
+
+
+def test_fit_footprint_snaps_a_square_to_zero_yaw():
+    from detaug.perception.point_cloud_stream import fit_footprint
+
+    rng = np.random.default_rng(1)
+    table_u = rng.uniform(-0.05, 0.05, 2000)
+    table_v = rng.uniform(-0.05, 0.05, 2000)
+    _, _, size_u, size_v, yaw = fit_footprint(table_u, table_v, 0.0)
+    assert yaw == 0.0
+    assert abs(size_u - 0.10) < 0.005 and abs(size_v - 0.10) < 0.005

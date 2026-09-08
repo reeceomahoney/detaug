@@ -41,7 +41,7 @@ class LiveState:
         self.status = b'{"running":false,"updated_at":0,"cameras":{}}'
         self.realign_requested = False
         self.select_points: dict[str, tuple[float, float]] | None = None
-        self.trim_percent = 40.0
+        self.trim_percent = 15.0
         self.obstacle_data: dict[str, object] | None = None
 
     def publish_image(self, name: str, payload: bytes) -> None:
