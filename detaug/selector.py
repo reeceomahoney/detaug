@@ -13,6 +13,7 @@ from detaug.kinematics import build_franka_chain, build_piper_chain
 
 LINKS = [f"fr3_link{i}" for i in range(8)] + ["fr3_hand"]
 FINGERS = ["fr3_leftfinger", "fr3_rightfinger"]
+HAND = LINKS.index("fr3_hand")
 FINGER_POINTS = [[0.0, 0.01, 0.01], [0.0, 0.01, 0.03], [0.0, 0.008, 0.045]]
 FINGER_Q = 0.02
 POINTS_PER_LINK = 128
@@ -219,16 +220,28 @@ class AnalyticSelector:
         """Total penetration. Ranking on clearance instead games the goal clamp
         -- the safest plan never approaches the cube at all -- so clearance buys
         nothing and every collision-free plan ties."""
-        boxes = self.box
-        if len(boxes) == 1:
-            boxes = boxes.expand(len(traj), *boxes.shape[1:])
-        else:
-            boxes = boxes.repeat_interleave(len(traj) // len(boxes), dim=0)
+        boxes = self.boxes_for(len(traj))
         out = []
         for i in range(0, len(traj), 32):
             c = traj[i : i + 32]
             pen = (-self.clearance_t(c, boxes[i : i + 32])).clamp(min=0.0).sum(dim=1)
             out.append(pen + self.body_penetration(c))
+        return torch.cat(out)
+
+    def boxes_for(self, n: int) -> Tensor:
+        boxes = self.box
+        if len(boxes) == 1:
+            return boxes.expand(n, *boxes.shape[1:])
+        return boxes.repeat_interleave(n // len(boxes), dim=0)
+
+    def grad(self, x: Tensor) -> Tensor:
+        boxes, out = self.boxes_for(len(x)), []
+        with torch.enable_grad():
+            for i in range(0, len(x), 32):
+                c = x[i : i + 32].detach().requires_grad_(True)
+                clear = self.clearance_t(c, boxes[i : i + 32], attach=True)
+                pen = (-clear).clamp(min=0.0).sum()
+                out.append(torch.autograd.grad(pen, c)[0])
         return torch.cat(out)
 
     def dist(self, points: Tensor, box: Tensor) -> Tensor:
@@ -245,21 +258,28 @@ class AnalyticSelector:
             return None
         return traj[..., self.cube_index : self.cube_index + 3] * self.cs + self.cm
 
-    def clearance_t(self, traj: Tensor, box: Tensor | None = None) -> Tensor:
+    def clearance_t(
+        self, traj: Tensor, box: Tensor | None = None, attach: bool = False
+    ) -> Tensor:
         """Per-timestep worst clearance (b, t): min over arm points, the cube, and
         both joint sources."""
         if box is None:
             box = self.box
         n = self.n_arm
-        worst = []
+        worst, hand = [], None
         # require both the joint targets and the plan's own predicted states to
         # clear: the two disagree by the controller's tracking lag
         for q in self.joints(traj):
             b, t = q.shape[:2]
-            pts = self.fc.arm_points(q.reshape(-1, n).float()).reshape(b, t, -1, 3)
+            mats, pts = self.fc.forward(q.reshape(-1, n).float())
+            pts = pts.reshape(b, t, -1, 3)
+            if hand is None:
+                hand = mats[:, HAND, :3, 3].reshape(b, t, 3) + self.fc.base_pos
             d = self.dist(pts + self.fc.base_pos, box)
             worst.append((d - self.rad).amin(dim=2))  # (b, t), mesh not centreline
         cube = self.cube(traj)
+        if cube is not None and attach and hand is not None:
+            cube = hand + (cube.float() - hand).detach()
         if cube is not None and self.hold > 0:
             grip = traj[..., self.joint_start + self.n_arm] * self.gs + self.gm
             d = self.dist(cube.float(), box) - self.hold

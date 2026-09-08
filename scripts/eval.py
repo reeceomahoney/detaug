@@ -77,6 +77,8 @@ class Config:
     cbf_axes: str = ""  # hand ellipsoid semi-axes "x,y,z" (default paper values)
     cbf_arm: str = ""  # comma-separated fr3 link indices to add to the barrier
     cbf_offset: str = ""  # hand ellipsoid centre offset in the TCP frame "x,y,z"
+    guide_scale: float = 0.0  # >0: selector-cost gradient guidance each ODE step
+    guide_from: float = 0.3  # flow time from which the guidance applies
     cape: bool = False  # CAPE: EE-sphere SDF guidance + prior-seeded refinement
     cape_scale: float = 3.0  # guidance strength lambda
     cape_prefix: int = 2  # executed steps per refinement (overrides n_action_steps)
@@ -179,6 +181,12 @@ def main(cfg: Config):
             cfg.cond in (Cond.ORACLE, Cond.FIXED, Cond.CLOUD) and cfg.n_cond > 1
         ):
             policy.selector_fn = sel.score
+    if sel is not None and cfg.guide_scale > 0:
+        policy.guidance, policy.guide_scale = sel.grad, cfg.guide_scale
+        policy.guide_from = cfg.guide_from
+        print(
+            f"selector-cost guidance: scale {cfg.guide_scale} from t {cfg.guide_from}"
+        )
     if cfg.cond is Cond.CLOUD:
         n_pts = getattr(policy.config, "cloud_points", 0)
         assert n_pts, "checkpoint has no point encoder"
