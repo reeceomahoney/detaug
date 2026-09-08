@@ -45,6 +45,8 @@ class Config:
     bend_min: float = 0.15  # half-angle, units of pi
     bend_max: float = 1.0
     bend_margin: float = 1.5
+    carry_margin: float = 0.5
+    ik_rot_weight: float = 1.0
     limit: int = 0
     ik_iters: int = 8  # per frame, warm-started
     ik_damping: float = 0.05
@@ -988,6 +990,7 @@ def augment_piper(cfg):
     todo: list[dict[str, Any]] = []
     grid = np.zeros(len(ALPHAS))
     margin = round(cfg.bend_margin * src.fps)
+    cm = round(cfg.carry_margin * src.fps)
     n_src = min(src.num_episodes, cfg.limit or src.num_episodes)
     for e in tqdm(range(n_src), desc="originals"):
         sel = epi == e
@@ -995,7 +998,7 @@ def augment_piper(cfg):
         write(dst, obs, act, np.zeros(4))
         grid += track_error(obs[:, arm], act[:, arm]) / n_src
         seg = carry_segment(act[:, 6], cfg.env.gripper_closed)
-        if seg is None or seg[1] - seg[0] < 2 * margin:
+        if seg is None or seg[1] - seg[0] < 2 * cm:
             continue
         opn = int((act[: seg[0], 6] >= cfg.env.gripper_closed).argmax())
         if seg[0] - margin - opn < 4:
@@ -1035,7 +1038,7 @@ def augment_piper(cfg):
         for x, phi, theta in zip(pending, phis, thetas):
             segs = [
                 (x["opn"], x["close"] - margin),
-                (x["close"] + margin, x["opened"] - margin),
+                (x["close"] + cm, x["opened"] - cm),
             ]
             d = sum(
                 bend_delta(x["obs_ee"], s0, s1, p, t)
@@ -1057,6 +1060,7 @@ def augment_piper(cfg):
             cfg.ik_damping,
             base,
             limits,
+            rot_w=cfg.ik_rot_weight,
         )
         achieved = fk(chain, na_j.reshape(-1, 6), base)[0].reshape(tm, len(pending), 3)
         rejected = []

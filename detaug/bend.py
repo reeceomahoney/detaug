@@ -98,7 +98,9 @@ def fk(chain, q, base):  # (T, 7) joints -> world EE pos, quat xyzw
     return pos, quat
 
 
-def solve_seq(chain, ee_t, quat_t, seed0, iters, damping, base, limits=None, ns=None):
+def solve_seq(
+    chain, ee_t, quat_t, seed0, iters, damping, base, limits=None, ns=None, rot_w=1.0
+):
     """(T, B, 3/4) world targets + (B, 7) initial joints -> (T, B, 7).
 
     Damped least squares, batched over copies and SEQUENTIAL over frames: each
@@ -108,6 +110,7 @@ def solve_seq(chain, ee_t, quat_t, seed0, iters, damping, base, limits=None, ns=
     limits = limits or chain.get_joint_limits()
     lo, hi = (torch.tensor(x, device=chain.device) for x in limits)
     eye = damping * torch.eye(6, device=chain.device)
+    w = torch.tensor([1.0, 1.0, 1.0, rot_w, rot_w, rot_w], device=chain.device)
     p = torch.as_tensor(ee_t - base, dtype=torch.float32, device=chain.device)
     q = torch.as_tensor(
         quat_t[..., [3, 0, 1, 2]], dtype=torch.float32, device=chain.device
@@ -134,6 +137,8 @@ def solve_seq(chain, ee_t, quat_t, seed0, iters, damping, base, limits=None, ns=
                 ],
                 dim=-1,
             )
+            if rot_w != 1.0:
+                err, jac = err * w, jac * w[:, None]
             jt = jac.transpose(1, 2)
             th = th + (jt @ torch.linalg.solve(jac @ jt + eye, err[..., None]))[..., 0]
             if ns is not None and float(ns_w[t].max()) > 0:
