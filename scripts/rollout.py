@@ -39,9 +39,11 @@ class DetAugConfig:
     deviation: float = 0.0  # penalise action distance from the zero-label plan
     resample: bool = False  # fresh candidates every replan instead of latching
     wait: float = 10.0  # seconds to wait for the first obstacle before starting
-    freeze: float = 1.5  # seconds to average the box over at start; 0 = track live
-    max_half: float = 0.15  # reject a box whose footprint half-extent exceeds this
-    max_spread: float = 0.02  # reject a freeze window whose centre moves more
+    max_half: float = 0.15
+    max_jump: float = 0.05
+    settle: float = 1.0
+    recal_timeout: float = 15.0
+    recal_attempts: int = 3
     seed: int = 0
     dump: str = ""  # non-empty: write per-replan plans and executed actions here
 
@@ -80,38 +82,160 @@ def sample_bends(n: int, stats, rng, device, lo: float, hi: float) -> torch.Tens
     return torch.tensor(bends, dtype=torch.float32, device=device)
 
 
-def freeze_box(client, seconds: float) -> tuple[np.ndarray, float, int]:
-    """Average the published box over a window and report how far its centre
-    wandered. A static obstacle needs no tracking, and a tracker that loses the
-    target reports a confident box somewhere else -- scoring against that is
-    indistinguishable from a clear scene, so freeze once and check the spread."""
+def diagnose(
+    box: np.ndarray | None,
+    reference: np.ndarray | None,
+    max_half: float,
+    max_jump: float,
+) -> str | None:
+    if box is None:
+        return "no obstacle box published"
+    half = box[3:]
+    if float(half[:2].max()) > max_half:
+        return (
+            f"footprint {2 * half[0]:.3f} x {2 * half[1]:.3f} m exceeds "
+            f"{2 * max_half:.3f} m, the tracker is probably masking the table"
+        )
+    if float(half.min()) <= 0.0:
+        return f"degenerate box {box.round(3)}"
+    if reference is not None:
+        jump = float(np.linalg.norm(box[:3] - reference[:3]))
+        if jump > max_jump:
+            return (
+                f"centre jumped {jump:.3f} m from {reference[:3].round(3)} to "
+                f"{box[:3].round(3)}"
+            )
+    return None
+
+
+def tracking_views(status: dict | None) -> list[str]:
+    if status is None:
+        return []
+    cameras = status.get("cameras") or {}
+    return [name for name, view in cameras.items() if view.get("tracking")]
+
+
+def aligned_since(status: dict | None, stamp: float) -> bool:
+    if status is None:
+        return False
+    cameras = status.get("cameras") or {}
+    return bool(cameras) and all(
+        float(view.get("aligned_at", 0.0)) >= stamp for view in cameras.values()
+    )
+
+
+def watch_box(client, seconds: float) -> list[np.ndarray]:
     seen: dict[float, np.ndarray] = {}
     deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
+    while True:
         payload = client.latest()
         if payload is not None and payload.get("box") is not None:
             seen[float(payload.get("stamp", 0.0))] = np.asarray(
                 payload["box"], np.float32
             )
+        if time.monotonic() >= deadline:
+            return list(seen.values())
         time.sleep(0.02)
-    if not seen:
-        raise RuntimeError("no obstacle published during the freeze window")
-    boxes = np.stack(list(seen.values()))
-    centres = boxes[:, :3]
+
+
+def settle_box(client, cfg: DetAugConfig) -> tuple[np.ndarray | None, str | None]:
+    boxes = watch_box(client, cfg.settle)
+    if not boxes:
+        return None, "no obstacle box published"
+    reason = diagnose(boxes[-1], None, cfg.max_half, cfg.max_jump)
+    if reason is not None:
+        return boxes[-1], reason
+    centres = np.stack(boxes)[:, :3]
     spread = float(np.linalg.norm(centres - centres.mean(0), axis=1).max())
-    return boxes.mean(0), spread, len(boxes)
+    if spread > cfg.max_jump:
+        return boxes[-1], f"centre wandered {spread:.3f} m over {cfg.settle:.1f}s"
+    if not tracking_views(client.status()):
+        return boxes[-1], "no view is tracking the target, the box is a leftover"
+    return boxes[-1], None
 
 
-def check_box(box: np.ndarray, max_half: float) -> None:
-    half = box[3:]
-    if float(half[:2].max()) > max_half:
-        raise RuntimeError(
-            f"obstacle footprint {2 * half[0]:.3f} x {2 * half[1]:.3f} m exceeds "
-            f"{2 * max_half:.3f} m -- the tracker is probably masking the table, "
-            "re-select the target with: pixi run perception --select-targets"
-        )
-    if float(half.min()) <= 0.0:
-        raise RuntimeError(f"degenerate obstacle box {box.round(3)}")
+def recalibrate(client, timeout: float) -> str | None:
+    requested = client.recalibrate()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = client.status()
+        phase = str((status or {}).get("phase", ""))
+        if phase.startswith("Realignment failed"):
+            return phase
+        if aligned_since(status, requested):
+            return None
+        time.sleep(0.1)
+    return f"tracker did not realign within {timeout:.0f}s"
+
+
+class ObstacleGuard:
+    def __init__(self, client, cfg: DetAugConfig):
+        self.client = client
+        self.cfg = cfg
+        self.reference: np.ndarray | None = None
+        self.requested = 0.0
+        self.aligned = 0.0
+        self.last_request = 0.0
+        self.recalibrations = 0
+
+    def startup(self) -> np.ndarray:
+        for attempt in range(self.cfg.recal_attempts + 1):
+            box, reason = settle_box(self.client, self.cfg)
+            if reason is None:
+                assert box is not None
+                self.reference = box
+                return box
+            if attempt == self.cfg.recal_attempts:
+                raise RuntimeError(
+                    f"obstacle still looks wrong after {attempt} recalibrations "
+                    f"({reason}); check the dashboard, or re-select the target "
+                    "in the perception dashboard"
+                )
+            logger.warning("obstacle looks wrong (%s); recalibrating", reason)
+            self.recalibrations += 1
+            failure = recalibrate(self.client, self.cfg.recal_timeout)
+            if failure is not None:
+                logger.warning("recalibration %d failed: %s", attempt + 1, failure)
+        raise AssertionError("unreachable")
+
+    def request(self, reason: str) -> None:
+        if time.time() - self.last_request < self.cfg.recal_timeout:
+            return
+        self.last_request = time.time()
+        logger.warning("obstacle looks wrong (%s); requesting recalibration", reason)
+        try:
+            self.requested = self.client.recalibrate()
+        except OSError as error:
+            logger.warning("could not reach the tracker to recalibrate: %s", error)
+            return
+        self.aligned = 0.0
+        self.recalibrations += 1
+
+    def current(self) -> np.ndarray | None:
+        box = self.client.box()
+        if self.requested:
+            status = self.client.status()
+            phase = str((status or {}).get("phase", ""))
+            if not self.aligned and aligned_since(status, self.requested):
+                self.aligned = time.time()
+                self.reference = None
+            if not self.aligned:
+                if phase.startswith("Realignment failed"):
+                    logger.warning("%s; keeping the last accepted box", phase)
+                    self.requested = 0.0
+                elif time.time() - self.requested > self.cfg.recal_timeout:
+                    logger.warning("tracker did not realign; keeping the last box")
+                    self.requested = 0.0
+                return None
+            if time.time() - self.aligned < self.cfg.settle:
+                return None
+            self.requested = 0.0
+        reason = diagnose(box, self.reference, self.cfg.max_half, self.cfg.max_jump)
+        if reason is not None:
+            self.request(reason)
+            return None
+        self.reference = box
+        return box
 
 
 def normalizer_stats(preprocessor) -> dict:
@@ -160,34 +284,26 @@ def attach_selector(ctx, cfg: DetAugConfig):
             "pipeline first: pixi run python -m detaug.perception.track_obstacle"
         )
 
-    frozen: np.ndarray | None = None
-    if cfg.freeze > 0 and cfg.collision != "pointcloud":
-        frozen, spread, n = freeze_box(client, cfg.freeze)
-        check_box(frozen, cfg.max_half)
-        logger.info(
-            "froze the obstacle over %.1fs: %d samples, centre spread %.3f m",
-            cfg.freeze,
-            n,
-            spread,
-        )
-        if spread > cfg.max_spread:
-            raise RuntimeError(
-                f"obstacle centre moved {spread:.3f} m during the freeze window "
-                f"(limit {cfg.max_spread:.3f}); the tracker is not holding the "
-                "target, check the dashboard before running the arm"
+    guard: ObstacleGuard | None = None
+    if cfg.collision != "pointcloud":
+        guard = ObstacleGuard(client, cfg)
+        try:
+            guard.startup()
+        except RuntimeError:
+            client.stop()
+            raise
+        if guard.recalibrations:
+            logger.info(
+                "tracker recalibrated %d times before start", guard.recalibrations
             )
-        frozen = frozen.copy()
-        frozen[3:] += cfg.margin
-        sel.set_boxes(frozen)
 
     def refresh() -> bool:
-        if frozen is not None:
-            return True
         if cfg.collision == "pointcloud":
             cloud = client.cloud()
             sel.set_cloud(cloud)
             return cloud is not None
-        box = client.box()
+        assert guard is not None
+        box = guard.current()
         if box is None:
             return False
         box = box.copy()
@@ -296,11 +412,10 @@ def attach_selector(ctx, cfg: DetAugConfig):
         if torch.is_tensor(policy.cond_candidates)
         else "resampled each replan",
     )
-    box = frozen if frozen is not None else client.box()
+    box = client.box()
     if box is not None:
         logger.info(
-            "obstacle box (base frame, %s): centre %s half %s",
-            "frozen" if frozen is not None else "live",
+            "obstacle box (base frame): centre %s half %s",
             box[:3].round(3),
             box[3:].round(3),
         )

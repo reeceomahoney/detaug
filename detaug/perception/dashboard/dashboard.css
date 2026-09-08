@@ -116,6 +116,11 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+.view {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .overlay {
   display: block;
   width: 100%;
@@ -123,6 +128,26 @@ h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
   min-height: 0;
   object-fit: contain;
   background: #050608;
+}
+body.selecting .tile.active {
+  border-color: #f2c94c;
+  box-shadow: 0 0 0 1px #f2c94c, 0 14px 35px #0003;
+}
+body.selecting .tile.active .overlay { cursor: crosshair; }
+body.selecting .tile.active .tile-tag { color: #f2c94c; }
+body.selecting #select-targets {
+  border-color: #f2c94c;
+  color: #f2c94c;
+}
+.marker {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid #f2c94c;
+  border-radius: 50%;
+  background: #f2c94c66;
+  pointer-events: none;
 }
 @media (max-aspect-ratio: 1/1) {
   .stage {

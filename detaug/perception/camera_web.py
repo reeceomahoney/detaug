@@ -40,6 +40,7 @@ class LiveState:
         self.robot_state_data: tuple[float, ...] | None = None
         self.status = b'{"running":false,"updated_at":0,"cameras":{}}'
         self.realign_requested = False
+        self.select_points: dict[str, tuple[float, float]] | None = None
         self.trim_percent = 40.0
         self.obstacle_data: dict[str, object] | None = None
 
@@ -157,6 +158,16 @@ class LiveState:
             self.realign_requested = False
             return requested
 
+    def request_select(self, points: dict[str, tuple[float, float]]) -> None:
+        with self.condition:
+            self.select_points = dict(points)
+
+    def consume_select_request(self) -> dict[str, tuple[float, float]] | None:
+        with self.condition:
+            points = self.select_points
+            self.select_points = None
+            return points
+
     def set_outlier_trim_percent(self, percentage: float) -> None:
         with self.condition:
             self.trim_percent = percentage
@@ -222,6 +233,20 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/actions/recalibrate":
             self.server.live_state.request_realign()
+            self.send_bytes(b'{"accepted":true}', "application/json")
+            return
+        if path == "/actions/select-targets":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                points = {
+                    name: (float(payload[name][0]), float(payload[name][1]))
+                    for name in ("top", "left")
+                }
+            except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError):
+                self.send_error(HTTPStatus.BAD_REQUEST, "Invalid target points")
+                return
+            self.server.live_state.request_select(points)
             self.send_bytes(b'{"accepted":true}', "application/json")
             return
         if path == "/actions/outlier-trim":

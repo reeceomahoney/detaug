@@ -28,14 +28,6 @@ ROBOT_CALIBRATION_PATH = CALIBRATION_DIR / "base_from_top.json"
 TOP_ROI_PATH = CALIBRATION_DIR / "top_roi.json"
 
 
-def parse_point(raw: str) -> tuple[float, float]:
-    try:
-        x, y = raw.split(",", 1)
-        return float(x), float(y)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("point must be X,Y") from error
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--top-serial", default=TOP_CAMERA_SERIAL)
@@ -52,8 +44,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--top-point", type=parse_point)
-    parser.add_argument("--left-point", type=parse_point)
     parser.add_argument("--target-dir", type=Path, default=TARGET_DIR)
     parser.add_argument("--top-roi", type=Path, default=TOP_ROI_PATH)
     parser.add_argument(
@@ -67,7 +57,6 @@ def parse_args() -> argparse.Namespace:
         default=ROBOT_CALIBRATION_PATH,
     )
     parser.add_argument("--can-interface", default="can_arm_right")
-    parser.add_argument("--select-targets", action="store_true")
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     return parser.parse_args()
@@ -338,75 +327,6 @@ class CameraCapture:
             self.stop_event.wait(1.0)
 
 
-def prompt_views(
-    cameras: dict[str, CameraCapture],
-    supplied: dict[str, tuple[float, float] | None],
-) -> dict[str, tuple[float, float]]:
-    points = {name: supplied[name] for name in ("top", "left")}
-    if all(point is not None for point in points.values()):
-        return {name: point for name, point in points.items() if point is not None}
-    window = "Select cups: TOP first, then LEFT | r=reset q=cancel"
-    width = cameras["top"].args.width
-
-    def mouse(event: int, x: int, y: int, flags: int, param) -> None:
-        del flags, param
-        if event != cv2.EVENT_LBUTTONDOWN:
-            return
-        if points["top"] is None and x < width:
-            points["top"] = (float(x), float(y))
-        elif points["left"] is None and x >= width:
-            points["left"] = (float(x - width), float(y))
-
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window, 2 * width, cameras["top"].args.height)
-    cv2.setMouseCallback(window, mouse)
-    print("Click the cups in the TOP image, then click them in the LEFT image")
-    while not all(point is not None for point in points.values()):
-        images = []
-        ready = True
-        for name in ("top", "left"):
-            image = cameras[name].latest()[0]
-            if image is None:
-                ready = False
-                break
-            view = image.copy()
-            active = points[name] is None and all(
-                points[previous] is not None
-                for previous in (("top",) if name == "left" else ())
-            )
-            colour = (0, 220, 255) if active else (120, 120, 120)
-            cv2.rectangle(
-                view, (1, 1), (view.shape[1] - 2, view.shape[0] - 2), colour, 3
-            )
-            cv2.putText(
-                view,
-                name.upper(),
-                (14, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                colour,
-                2,
-                cv2.LINE_AA,
-            )
-            if points[name] is not None:
-                point = points[name]
-                assert point is not None
-                center = (round(point[0]), round(point[1]))
-                cv2.circle(view, center, 6, (0, 255, 0), -1)
-            images.append(view)
-        if ready:
-            cv2.imshow(window, np.hstack(images))
-        key = cv2.waitKey(20) & 0xFF
-        if key == ord("r"):
-            points = {"top": supplied["top"], "left": supplied["left"]}
-        elif key in (27, ord("q")):
-            cv2.destroyWindow(window)
-            raise RuntimeError("Target selection cancelled")
-    cv2.waitKey(250)
-    cv2.destroyWindow(window)
-    return {name: point for name, point in points.items() if point is not None}
-
-
 def target_reference(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     rows, cols = np.nonzero(mask)
     if not len(rows):
@@ -508,13 +428,17 @@ def load_target(path: Path) -> dict[str, object]:
     }
 
 
+def targets_saved(args: argparse.Namespace) -> bool:
+    return all((args.target_dir / f"{name}.npz").exists() for name in ("top", "left"))
+
+
 def load_targets(args: argparse.Namespace) -> dict[str, dict[str, object]]:
     targets = {}
     for name in ("top", "left"):
         path = args.target_dir / f"{name}.npz"
         if not path.exists():
             raise RuntimeError(
-                "No saved obstacle targets. Run track_obstacle --select-targets first."
+                "No saved obstacle targets. Select them in the dashboard first."
             )
         targets[name] = load_target(path)
     return targets
@@ -712,20 +636,32 @@ class ViewTracker:
         return visible_mask, score, self.output_fps
 
 
-def select_targets(
+def crop_prompt(
+    camera: CameraCapture, point: tuple[float, float]
+) -> tuple[float, float]:
+    x, y = point
+    if camera.crop is not None:
+        x -= camera.crop.x
+        y -= camera.crop.y
+    if not (0 <= x < camera.args.width and 0 <= y < camera.args.height):
+        raise RuntimeError(f"{camera.name} click is outside the tracked region")
+    return float(x), float(y)
+
+
+def create_targets(
     args: argparse.Namespace,
     cameras: dict[str, CameraCapture],
     board: StatusBoard,
-) -> tuple[Any, Any, str, Any]:
-    board.set_phase("Select the cups in both camera views")
-    prompts = prompt_views(
-        cameras,
-        {"top": args.top_point, "left": args.left_point},
-    )
+    sam: tuple[Any, Any, str, Any],
+    points: dict[str, tuple[float, float]],
+) -> None:
+    prompts = {
+        name: crop_prompt(camera, points[name]) for name, camera in cameras.items()
+    }
     for name in cameras:
         board.set_camera(name, message="Target selected; creating cutout")
     board.set_phase("Creating saved target cutouts")
-    model, processor, device, dtype = load_sam(args)
+    model, processor, device, dtype = sam
     for name, camera in cameras.items():
         image, depth_m, intrinsics, _, _, _ = camera.latest()
         if image is None or depth_m is None or intrinsics is None:
@@ -758,7 +694,6 @@ def select_targets(
     board.set_phase("Targets saved")
     board.publish()
     print(f"Saved top and left targets in {args.target_dir}")
-    return model, processor, device, dtype
 
 
 def align_trackers(
@@ -813,33 +748,49 @@ def track_targets(
     args: argparse.Namespace,
     cameras: dict[str, CameraCapture],
     board: StatusBoard,
-    targets: dict[str, dict[str, object]],
-    sam: tuple[Any, Any, str, Any] | None = None,
+    targets: dict[str, dict[str, object]] | None,
 ) -> None:
-    if sam is None:
-        for name in cameras:
-            board.set_camera(name, message="Saved target loaded; loading SAM2")
-        board.set_phase("Loading SAM2 with saved targets")
-        sam = load_sam(args)
-    model, processor, device, dtype = sam
-    board.set_phase("Aligning saved targets")
-    trackers = align_trackers(args, cameras, board, targets)
+    sam: tuple[Any, Any, str, Any] | None = None
+
+    def ensure_sam() -> tuple[Any, Any, str, Any]:
+        nonlocal sam
+        if sam is None:
+            board.set_phase("Loading SAM2")
+            sam = load_sam(args)
+        return sam
+
+    trackers: dict[str, ViewTracker] = {}
     versions = {name: -1 for name in cameras}
     period = 1.0 / args.tracking_fps
-    board.set_phase("Tracking both camera views")
+    if targets is not None:
+        for name in cameras:
+            board.set_camera(name, message="Saved target loaded; loading SAM2")
+        ensure_sam()
+        board.set_phase("Aligning saved targets")
+        trackers = align_trackers(args, cameras, board, targets)
+        board.set_phase("Tracking both camera views")
+    else:
+        for name in cameras:
+            board.set_camera(name, message="No saved target")
+        board.set_phase("No saved targets; press Select targets in the dashboard")
     while True:
         cycle_start = time.monotonic()
+        points = board.live_state.consume_select_request()
+        if points is not None:
+            try:
+                create_targets(args, cameras, board, ensure_sam(), points)
+                board.set_phase("Aligning saved targets")
+                trackers = align_trackers(args, cameras, board, load_targets(args))
+                versions = {name: -1 for name in cameras}
+                board.set_phase("Tracking both camera views")
+            except Exception as error:
+                board.set_phase(f"Target selection failed: {error}")
         if board.live_state.consume_realign_request():
             board.set_phase("Reloading and realigning saved targets")
             try:
                 reloaded_targets = load_targets(args)
-                aligned_trackers = align_trackers(
-                    args,
-                    cameras,
-                    board,
-                    reloaded_targets,
-                )
-                trackers = aligned_trackers
+                ensure_sam()
+                trackers = align_trackers(args, cameras, board, reloaded_targets)
                 versions = {name: -1 for name in cameras}
                 board.set_phase("Tracking both camera views")
             except Exception as error:
@@ -861,6 +812,18 @@ def track_targets(
             ):
                 continue
             versions[name] = version
+            if name not in trackers:
+                board.live_state.publish_image(
+                    f"{name}_overlay.jpg",
+                    encode_image(
+                        ".jpg",
+                        image if source_image is None else source_image,
+                        args.jpeg_quality,
+                    ),
+                )
+                continue
+            assert sam is not None
+            model, processor, device, dtype = sam
             try:
                 mask, score, output_fps = trackers[name].process(
                     model,
@@ -915,7 +878,7 @@ def main() -> None:
             f"Top ROI must output {args.width}x{args.height}; got "
             f"{top_roi.width}x{top_roi.height}"
         )
-    targets = None if args.select_targets else load_targets(args)
+    targets = load_targets(args) if targets_saved(args) else None
     live_state = LiveState()
     dashboard = None
     cloud_stream = None
@@ -934,12 +897,7 @@ def main() -> None:
     board.start()
     for camera in cameras.values():
         camera.start()
-    sam = None
     try:
-        if args.select_targets:
-            sam = select_targets(args, cameras, board)
-            targets = load_targets(args)
-        assert targets is not None
         cloud_stream = PointCloudStream(
             live_state,
             args.jpeg_quality,
@@ -957,7 +915,7 @@ def main() -> None:
             args.port,
         )
         print(f"Open http://localhost:{args.port}")
-        track_targets(args, cameras, board, targets, sam)
+        track_targets(args, cameras, board, targets)
     except KeyboardInterrupt:
         board.set_phase("Stopped")
     finally:

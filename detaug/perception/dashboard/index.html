@@ -15,6 +15,7 @@
       <input id="outlier-trim" type="range" min="0" max="50"
         step="1" value="40">
       <output id="outlier-value">40%</output></div>
+    <button class="recalibrate" id="select-targets">Select targets</button>
     <button class="recalibrate" id="recalibrate">Recalibrate</button>
     <div class="overall"><span class="dot" id="overall-dot"></span>
       <span id="overall-text">Waiting for tracker</span></div>
@@ -26,12 +27,18 @@
     <article class="tile">
       <div class="tile-head"><span class="tile-title">Top tracking view</span>
         <span class="tile-tag" id="top-metrics">Waiting</span></div>
-      <img class="overlay live-image" data-file="top_overlay.jpg">
+      <div class="view" data-view="top">
+        <img class="overlay live-image" data-file="top_overlay.jpg">
+        <span class="marker" id="top-marker" hidden></span>
+      </div>
     </article>
     <article class="tile">
       <div class="tile-head"><span class="tile-title">Left wrist tracking view</span>
         <span class="tile-tag" id="left-metrics">Waiting</span></div>
-      <img class="overlay live-image" data-file="left_overlay.jpg">
+      <div class="view" data-view="left">
+        <img class="overlay live-image" data-file="left_overlay.jpg">
+        <span class="marker" id="left-marker" hidden></span>
+      </div>
     </article>
   </section>
 </main>

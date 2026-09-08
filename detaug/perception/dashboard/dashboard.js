@@ -23,6 +23,115 @@ async function recalibrate() {
   }
 }
 
+const VIEWS = ['top', 'left'];
+let selection = null;
+
+function viewImage(name) {
+  return document.querySelector(`.view[data-view="${name}"] img`);
+}
+
+function viewTile(name) {
+  return document.querySelector(`.view[data-view="${name}"]`).closest('.tile');
+}
+
+function imageFrame(img) {
+  const rect = img.getBoundingClientRect();
+  if (!img.naturalWidth || !img.naturalHeight) return null;
+  const scale = Math.min(
+    rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+  const width = img.naturalWidth * scale;
+  const height = img.naturalHeight * scale;
+  return {
+    scale,
+    left: (rect.width - width) / 2,
+    top: (rect.height - height) / 2,
+    width,
+    height,
+    rect,
+  };
+}
+
+function imagePoint(img, event) {
+  const frame = imageFrame(img);
+  if (!frame) return null;
+  const x = (event.clientX - frame.rect.left - frame.left) / frame.scale;
+  const y = (event.clientY - frame.rect.top - frame.top) / frame.scale;
+  if (x < 0 || y < 0 || x >= img.naturalWidth || y >= img.naturalHeight) {
+    return null;
+  }
+  return [x, y];
+}
+
+function placeMarkers() {
+  VIEWS.forEach(name => {
+    const marker = document.getElementById(`${name}-marker`);
+    const point = selection?.[name];
+    const frame = imageFrame(viewImage(name));
+    if (!point || !frame) {
+      marker.hidden = true;
+      return;
+    }
+    marker.hidden = false;
+    marker.style.left = `${frame.left + point[0] * frame.scale}px`;
+    marker.style.top = `${frame.top + point[1] * frame.scale}px`;
+  });
+}
+
+function activeView() {
+  return selection ? VIEWS.find(name => !selection[name]) : null;
+}
+
+function renderSelection() {
+  document.body.classList.toggle('selecting', selection !== null);
+  const active = activeView();
+  VIEWS.forEach(name => viewTile(name).classList.toggle('active', name === active));
+  const button = document.getElementById('select-targets');
+  button.textContent = selection ? 'Cancel selection' : 'Select targets';
+  placeMarkers();
+}
+
+function beginSelection() {
+  selection = {top: null, left: null};
+  renderSelection();
+}
+
+function endSelection() {
+  selection = null;
+  renderSelection();
+}
+
+async function submitSelection(points) {
+  const button = document.getElementById('select-targets');
+  button.disabled = true;
+  button.textContent = 'Saving targets…';
+  try {
+    const response = await fetch('/actions/select-targets', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(points),
+    });
+    if (!response.ok) throw new Error('Request failed');
+  } catch (error) {
+    document.getElementById('overall-text').textContent = 'Selection failed';
+  } finally {
+    button.disabled = false;
+    endSelection();
+  }
+}
+
+function pickPoint(name, event) {
+  if (activeView() !== name) return;
+  const point = imagePoint(viewImage(name), event);
+  if (!point) return;
+  selection[name] = point;
+  renderSelection();
+  if (VIEWS.every(view => selection[view])) submitSelection(selection);
+}
+
+function toggleSelection() {
+  if (selection) endSelection(); else beginSelection();
+}
+
 let outlierRequestTimer;
 
 function requestOutlierTrim() {
@@ -45,6 +154,11 @@ function requestOutlierTrim() {
 
 function updateCamera(name, data, fresh) {
   const metrics = document.getElementById(`${name}-metrics`);
+  if (selection) {
+    metrics.textContent = activeView() === name
+      ? 'Click the object' : selection[name] ? 'Picked' : 'Waiting';
+    return;
+  }
   if (!data) {
     metrics.textContent = 'Waiting';
     return;
@@ -83,6 +197,12 @@ async function refreshStatus() {
 refreshImages();
 refreshStatus();
 document.getElementById('recalibrate').addEventListener('click', recalibrate);
+document.getElementById('select-targets').addEventListener('click', toggleSelection);
+VIEWS.forEach(name => viewImage(name).addEventListener('click', event => pickPoint(name, event)));
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && selection) endSelection();
+});
+window.addEventListener('resize', placeMarkers);
 document.getElementById('outlier-trim').addEventListener('input', requestOutlierTrim);
 setInterval(refreshImages, 200);
 setInterval(refreshStatus, 800);
