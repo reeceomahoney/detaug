@@ -5,13 +5,6 @@ function refreshImages() {
   });
 }
 
-function refreshTargets() {
-  const stamp = Date.now();
-  document.querySelectorAll('.target-image').forEach(image => {
-    image.src = `/targets/${image.dataset.file}?t=${stamp}`;
-  });
-}
-
 async function recalibrate() {
   const button = document.getElementById('recalibrate');
   button.disabled = true;
@@ -19,7 +12,6 @@ async function recalibrate() {
   try {
     const response = await fetch('/actions/recalibrate', {method: 'POST'});
     if (!response.ok) throw new Error('Request failed');
-    refreshTargets();
     button.textContent = 'Requested';
   } catch (error) {
     button.textContent = 'Failed';
@@ -89,7 +81,6 @@ async function refreshStatus() {
 }
 
 refreshImages();
-refreshTargets();
 refreshStatus();
 document.getElementById('recalibrate').addEventListener('click', recalibrate);
 document.getElementById('outlier-trim').addEventListener('input', requestOutlierTrim);
