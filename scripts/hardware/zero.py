@@ -8,7 +8,7 @@ OPEN_POSITION = 70_000
 
 def main():
     arms = {
-        # "left": C_PiperInterface_V2("can_arm_left"),
+        "left": C_PiperInterface_V2("can_arm_left"),
         "right": C_PiperInterface_V2("can_arm_right"),
     }
 
@@ -29,8 +29,7 @@ def main():
             arm.GripperCtrl(OPEN_POSITION, 1000, 0x01, 0)
         time.sleep(0.5)
 
-    for arm in arms.values():
-        arm.GripperCtrl(0, 1000, 0x01, 0)
+    arms["right"].GripperCtrl(0, 1000, 0x01, 0)
 
 
 if __name__ == "__main__":

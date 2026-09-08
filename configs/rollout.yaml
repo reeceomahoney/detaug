@@ -18,7 +18,7 @@ robot:
 
 policy:
   path: reece-omahoney/piper-pick-and-place-aug
-  n_action_steps: 30
+  n_action_steps: 10
   zero_cond: true
 
 detaug:

@@ -61,21 +61,22 @@ def sample_bends(n: int, stats, rng, device, lo: float, hi: float) -> torch.Tens
     the proposal range -- sampling that range conditions the policy off
     distribution and it degenerates. The checkpoint's own bend stats carry the
     surviving support, so bound the arc by those and reject anything outside."""
-    low = np.asarray(stats["min"], np.float64)
-    high = np.asarray(stats["max"], np.float64)
-    phi_max = hi * float(np.abs(np.stack([low, high])).max())
-    phi_min = min(lo * phi_max, phi_max)
-    keep = np.zeros((0, 2))
+    low = np.asarray(stats["min"], np.float64).reshape(-1, 2)
+    high = np.asarray(stats["max"], np.float64).reshape(-1, 2)
+    n_arc = len(low)
+    phi_max = hi * np.abs(np.stack([low, high])).max((0, 2))
+    phi_min = np.minimum(lo * phi_max, phi_max)
+    keep = np.zeros((0, n_arc, 2))
     for _ in range(100):
         if len(keep) >= n:
             break
-        phi = rng.uniform(phi_min, phi_max, 8 * n)
-        theta = rng.uniform(0.0, np.pi, 8 * n)
-        arc = np.stack([phi * np.cos(theta), phi * np.sin(theta)], axis=1)
-        inside = np.all((arc >= low) & (arc <= high), axis=1)
+        phi = rng.uniform(phi_min, phi_max, (8 * n, n_arc))
+        theta = rng.uniform(0.0, np.pi, (8 * n, n_arc))
+        arc = np.stack([phi * np.cos(theta), phi * np.sin(theta)], axis=2)
+        inside = np.all((arc >= low) & (arc <= high), axis=(1, 2))
         keep = np.concatenate([keep, arc[inside]])
     assert len(keep) >= n, "bend stats leave no room to sample candidates"
-    bends = np.concatenate([np.zeros((1, 2)), keep[:n]])
+    bends = np.concatenate([np.zeros((1, n_arc, 2)), keep[:n]]).reshape(n + 1, -1)
     return torch.tensor(bends, dtype=torch.float32, device=device)
 
 
