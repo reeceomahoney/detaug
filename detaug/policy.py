@@ -22,6 +22,8 @@ from lerobot.configs.types import FeatureType, NormalizationMode
 from lerobot.optim.optimizers import AdamWConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.rtc.configuration_rtc import RTCConfig
+from lerobot.policies.rtc.modeling_rtc import RTCProcessor
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
@@ -81,6 +83,7 @@ class FlowMatchingConfig(PreTrainedConfig):
     )
 
     pretrained_revision: str | None = None
+    rtc_config: RTCConfig | None = None
 
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
@@ -259,6 +262,7 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         self.replans = 0
         self.dirty = 0
         self.last_dirty = None
+        self.init_rtc_processor()
         self.reset()
 
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -266,6 +270,17 @@ class FlowMatchingPolicy(PreTrainedPolicy):
 
     def get_optim_params(self) -> Iterator[nn.Parameter]:  # ty: ignore[invalid-method-override]
         return self.parameters()
+
+    def supports_rtc(self) -> bool:
+        return True
+
+    def init_rtc_processor(self) -> None:
+        self.rtc_processor = None
+        if self.config.rtc_config is not None:
+            self.rtc_processor = RTCProcessor(self.config.rtc_config)
+
+    def rtc_enabled(self) -> bool:
+        return self.config.rtc_config is not None and self.config.rtc_config.enabled
 
     def reset(self):
         self._action_queue = deque([], maxlen=self.config.n_action_steps)
@@ -318,18 +333,38 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         cond: Tensor | None,
         cloud: Tensor | None = None,
         t0: float = 0.0,
+        inference_delay: int | None = None,
+        prev_chunk_left_over: Tensor | None = None,
+        execution_horizon: int | None = None,
     ) -> Tensor:
         """ODE-integrate x from t0 to 1, re-clamping the boundary frames each step."""
         sd, gd = self.state_dim, self.config.goal_dim
         gs = self.config.goal_state_start
+        rtc = self.rtc_processor
+        guide_prefix = rtc is not None and self.rtc_enabled()
         n = max(1, math.ceil((1 - t0) * self.config.num_inference_steps - 1e-6))
         dt = (1 - t0) / n
         for i in range(n):
-            t = torch.full((x.shape[0],), t0 + i * dt, device=x.device)
+            ti = t0 + i * dt
+            t = torch.full((x.shape[0],), ti, device=x.device)
             x = x.clone()
             x[:, 0, :sd] = state
             x[:, -1, gs : gs + gd] = goal
-            x = x + dt * self.model(x, t, cond, None, cloud)
+            v = self.model(x, t, cond, None, cloud)
+            if guide_prefix and prev_chunk_left_over is not None:
+                assert rtc is not None
+                va = rtc.denoise_step(
+                    x_t=x[..., sd:],
+                    prev_chunk_left_over=prev_chunk_left_over,
+                    inference_delay=inference_delay or 0,
+                    time=1.0 - ti,
+                    original_denoise_step_partial=lambda _, va=-v[..., sd:]: va,
+                    execution_horizon=execution_horizon,
+                )
+                v = torch.cat([v[..., :sd], -va], dim=-1)
+            x = x + dt * v
+            if rtc is not None and rtc.is_debug_enabled():
+                rtc.track(time=1.0 - ti, x_t=x[..., sd:], v_t=-v[..., sd:])
             if (
                 self.guidance is not None
                 and t0 + (i + 1) * dt >= self.guide_from - 1e-6
@@ -338,7 +373,14 @@ class FlowMatchingPolicy(PreTrainedPolicy):
         return x
 
     @torch.no_grad()
-    def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs) -> Tensor:
+    def predict_action_chunk(
+        self,
+        batch: dict[str, Tensor],
+        inference_delay: int | None = None,
+        prev_chunk_left_over: Tensor | None = None,
+        execution_horizon: int | None = None,
+        **kwargs,
+    ) -> Tensor:
         """Flow-ODE integrate a [state, action] trajectory, conditioning by
         inpainting: each step clamp frame 0's state to the current state and frame
         -1's goal dims to the goal (already in position space, see alias_goal_stats).
@@ -394,6 +436,16 @@ class FlowMatchingPolicy(PreTrainedPolicy):
                 if self.cloud.shape[0] > 1
                 else self.cloud.expand(m, -1, -1)
             )
+        prev = prev_chunk_left_over
+        if prev is not None:
+            prev = prev.to(device=obs.device, dtype=x.dtype)
+            if prev.ndim == 2:
+                prev = prev[None]
+            prev = (
+                prev.repeat_interleave(k, 0)
+                if prev.shape[0] > 1
+                else prev.expand(m, -1, -1)
+            )
         x = torch.cat(
             [
                 self.flow_integrate(
@@ -403,6 +455,9 @@ class FlowMatchingPolicy(PreTrainedPolicy):
                     None if cond is None else cond[i : i + mb],
                     None if cloud is None else cloud[i : i + mb],
                     t0,
+                    inference_delay,
+                    None if prev is None else prev[i : i + mb],
+                    execution_horizon,
                 )
                 for i in range(0, m, mb)
             ]

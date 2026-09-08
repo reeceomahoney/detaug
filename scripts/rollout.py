@@ -250,20 +250,34 @@ def attach_selector(ctx, cfg: DetAugConfig):
     policy.deviation = cfg.deviation
     policy.cond_candidates = draw if cfg.resample else draw()
 
-    inner = policy.select_action
+    inner_chunk = policy.predict_action_chunk
 
-    def select_action(batch, **kwargs):
-        action = inner(batch, **kwargs)
+    def predict_action_chunk(batch, **kwargs):
+        chunk = inner_chunk(batch, **kwargs)
         if len(trace["costs"]) > len(trace["plan"]):  # a replan just landed
             trace["plan"].append(policy.plan[0].cpu().numpy())
             idx = policy.latched_idx
             trace["chosen"].append(-1 if idx is None else int(idx[0]))
-        trace["obs"].append(batch[OBS_STATE].detach().cpu().numpy().reshape(-1))
-        trace["act"].append(action.detach().cpu().numpy().reshape(-1))
+        return chunk
+
+    policy.predict_action_chunk = predict_action_chunk
+
+    engine = ctx.policy.inference
+    inner_get = engine.get_action
+    obs_stats, act_stats = stats[OBS_STATE], stats[ACTION]
+
+    def get_action(obs_frame):
+        action = inner_get(obs_frame)
+        if action is None or obs_frame is None:
+            return action
+        obs = np.asarray(obs_frame[OBS_STATE], np.float32).reshape(-1)
+        act = action.detach().cpu().numpy().reshape(-1)
+        trace["obs"].append((obs - obs_stats["mean"]) / (obs_stats["std"] + 1e-8))
+        trace["act"].append((act - act_stats["mean"]) / (act_stats["std"] + 1e-8))
         trace["step_time"].append(time.time())
         return action
 
-    policy.select_action = select_action
+    engine.get_action = get_action
 
     refresh()
     logger.info(

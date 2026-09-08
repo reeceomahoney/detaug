@@ -18,8 +18,7 @@ robot:
 
 policy:
   path: reece-omahoney/piper-pick-and-place-aug
-  n_action_steps: 10
-  zero_cond: true
+  n_action_steps: 20
 
 detaug:
   obstacle_url: http://127.0.0.1:8080/obstacle.json
