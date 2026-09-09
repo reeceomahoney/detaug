@@ -80,6 +80,14 @@ sky launch configs/sky.yaml -c flow -y --env HF_TOKEN --env WANDB_API_KEY
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+# transformers decorates `.to`, which type checkers cannot follow
+[[tool.ty.overrides]]
+include = ["scripts/viz/hardware/edit_mask.py"]
+
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+missing-argument = "ignore"
+
 # warp's kernel DSL confuses type checkers
 [[tool.ty.overrides]]
 include = [
