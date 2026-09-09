@@ -5,12 +5,23 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from detaug.kinematics import EE_FRAME, build_franka_chain
-from detaug.selector import POINTS_PER_LINK, box_sdf
+from detaug.kinematics import EE_FRAME, build_franka_chain, build_piper_chain
+from detaug.selector import (
+    PIPER_CAMERA_RADIUS,
+    PIPER_RADIUS,
+    PIPER_TIP,
+    POINTS_PER_LINK,
+    PiperCollision,
+    box_sdf,
+    obstacle_dist,
+)
 
 EE_AXES = (0.06, 0.12, 0.11)
 EE_OFFSET = (0.0, 0.0, -0.056)
+PIPER_EE_AXES = (0.05, 0.06, 0.09)
+PIPER_EE_OFFSET = (0.0, 0.0, PIPER_TIP / 2)
 FAR = 1e3
+MVEE_POINTS = 512
 
 
 def mvee(points, tol: float = 1e-4) -> tuple[Tensor, Tensor]:
@@ -33,9 +44,22 @@ def mvee(points, tol: float = 1e-4) -> tuple[Tensor, Tensor]:
     return c.float(), a.float()
 
 
+def bounding_sphere(points) -> tuple[Tensor, Tensor]:
+    p = torch.as_tensor(points, dtype=torch.float32).cpu()
+    c = p.mean(0)
+    r = (p - c).norm(dim=1).max().clamp_min(1e-3)
+    return c, torch.eye(3) / (r * r)
+
+
 def size_matrix(a: Tensor) -> Tensor:
     w, v = torch.linalg.eigh(a)
     return v @ torch.diag(w.clamp_min(1e-12) ** -0.5) @ v.T
+
+
+def yaw_matrix(yaw: Tensor) -> Tensor:
+    c, s = torch.cos(yaw), torch.sin(yaw)
+    z, o = torch.zeros_like(c), torch.ones_like(c)
+    return torch.stack([c, -s, z, s, c, z, z, z, o], -1).reshape(*yaw.shape, 3, 3)
 
 
 def fibonacci_sphere(n: int) -> Tensor:
@@ -59,7 +83,6 @@ class EllipsoidCBF:
     ):
         f32 = {"dtype": torch.float32, "device": device}
         self.device = device
-        self.chain, self.njoints, _ = build_franka_chain(device)
         self.base_pos = torch.as_tensor(base_pos, **f32)
         self.axes = torch.as_tensor(axes, **f32)
         self.offset = torch.as_tensor(offset, **f32)
@@ -70,6 +93,10 @@ class EllipsoidCBF:
         self.fc = None
         self.boxes = None
         self.ob_c = self.ob_q = None
+        self.build_chain(device)
+
+    def build_chain(self, device):
+        self.chain, self.njoints, _ = build_franka_chain(device)
 
     def set_obstacles(self, point_sets):
         cs, qs = [], []
@@ -78,7 +105,13 @@ class EllipsoidCBF:
                 cs.append(torch.full((3,), FAR))
                 qs.append(torch.eye(3) * 1e-3)
                 continue
-            c, a = mvee(pts)
+            pts = np.asarray(pts, np.float64)
+            if len(pts) > MVEE_POINTS:
+                pts = pts[np.linspace(0, len(pts) - 1, MVEE_POINTS, dtype=np.int64)]
+            try:
+                c, a = mvee(pts)
+            except torch.linalg.LinAlgError:
+                c, a = bounding_sphere(pts)
             cs.append(c)
             qs.append(size_matrix(a))
         self.ob_c = torch.stack(cs).to(self.device)[:, None]
@@ -89,14 +122,18 @@ class EllipsoidCBF:
         w = len(boxes_per_world)
         c = torch.full((w, g, 3), FAR)
         q = torch.eye(3).repeat(w, g, 1, 1) * 1e-3
-        boxes = torch.tensor([FAR, FAR, FAR, 0.01, 0.01, 0.01]).repeat(w, g, 1)
+        boxes = torch.tensor([FAR, FAR, FAR, 0.01, 0.01, 0.01, 0.0]).repeat(w, g, 1)
         for i, b in enumerate(boxes_per_world):
             if b is None:
                 continue
             b = torch.as_tensor(np.asarray(b), dtype=torch.float32)
             c[i, : len(b)] = b[:, :3]
-            q[i, : len(b)] = torch.diag_embed(b[:, 3:] * 3**0.5)
-            boxes[i, : len(b)] = b
+            qi = torch.diag_embed(b[:, 3:6] * 3**0.5)
+            if b.shape[1] > 6:
+                r = yaw_matrix(b[:, 6])
+                qi = r @ qi @ r.transpose(1, 2)
+            q[i, : len(b)] = qi
+            boxes[i, : len(b), : b.shape[1]] = b
         self.ob_c, self.ob_q = c.to(self.device), q.to(self.device)
         self.boxes = boxes.to(self.device)
 
@@ -115,7 +152,7 @@ class EllipsoidCBF:
             boxes = boxes.repeat_interleave(len(pts) // len(boxes), 0)
         d = torch.stack(
             [
-                box_sdf(pts, boxes[:, k, None, :3], boxes[:, k, None, 3:])
+                box_sdf(pts, boxes[:, k, None, :3], boxes[:, k, None, 3:6])
                 for k in range(boxes.shape[1])
             ]
         ).amin(0)
@@ -183,3 +220,64 @@ class EllipsoidCBF:
             h = self.value(q, attach)
             g = torch.autograd.grad(h.sum(), q)[0]
         return self.constrain(dq_nom, g, h.detach()), h.detach()
+
+
+class PiperCBF(EllipsoidCBF):
+    def __init__(
+        self,
+        device,
+        base_pos=(0.0, 0.0, 0.0),
+        alpha: float = 10.0,
+        dt: float = 0.05,
+        n_dirs: int = 1024,
+        axes: Sequence[float] = PIPER_EE_AXES,
+        offset: Sequence[float] = PIPER_EE_OFFSET,
+        arm: bool = False,
+        radius: float = PIPER_RADIUS,
+        camera_radius: float = PIPER_CAMERA_RADIUS,
+    ):
+        super().__init__(device, base_pos, alpha, dt, n_dirs, axes, offset)
+        self.arm_links = (0,) if arm else ()
+        self.piper = PiperCollision(
+            device, base_pos, radius=radius, camera_radius=camera_radius
+        )
+        self.fc = self.piper
+        self.cloud = None
+
+    def build_chain(self, device):
+        self.chain = build_piper_chain(device)
+        self.njoints = 6
+
+    def held(self, offset: float) -> Tensor:
+        return torch.tensor([[0.0, 0.0, self.piper.tip + offset]], device=self.device)
+
+    def set_cloud(self, points):
+        self.cloud = (
+            None
+            if points is None or not len(points)
+            else torch.as_tensor(np.asarray(points, np.float32), device=self.device)
+        )
+        self.boxes = None
+        self.set_obstacles([points])
+
+    def set_boxes(self, boxes_per_world):
+        self.cloud = None
+        super().set_boxes(boxes_per_world)
+
+    def ee(self, q: Tensor) -> tuple[Tensor, Tensor]:
+        m = self.chain.forward_kinematics(q).get_matrix()
+        r = m[:, :3, :3]
+        p = m[:, :3, 3] + self.base_pos + (r @ self.offset)
+        return p, r
+
+    def h_arm(self, q: Tensor) -> Tensor:
+        pts = self.piper.arm_points(q)
+        if self.cloud is not None:
+            d = torch.cdist(pts, self.cloud[None].expand(len(pts), -1, -1)).amin(2)
+        else:
+            assert self.boxes is not None
+            boxes = self.boxes
+            if len(pts) != len(boxes):
+                boxes = boxes.repeat_interleave(len(pts) // len(boxes), 0)
+            d = obstacle_dist(pts, boxes, None)
+        return (d - self.piper.radii).amin(1)

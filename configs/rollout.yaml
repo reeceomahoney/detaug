@@ -32,6 +32,7 @@ detaug:
   resample: true
   max_jump: 0.05
   dump: outputs/rollout
+  cbf: false
 
 
 fps: 20

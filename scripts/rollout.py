@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,7 @@ from lerobot.utils.process import ProcessSignalHandler
 from lerobot.utils.utils import init_logging
 from lerobot.utils.visualization_utils import init_visualization, shutdown_visualization
 
+from detaug.cbf import PiperCBF
 from detaug.perception.client import ObstacleClient
 from detaug.selector import PiperSelector
 
@@ -47,6 +49,13 @@ class DetAugConfig:
     recal_attempts: int = 3
     seed: int = 0
     dump: str = ""  # non-empty: write per-replan plans and executed actions here
+    cbf: bool = False
+    cbf_alpha: float = 10.0
+    cbf_margin: float = 0.0
+    cbf_arm: bool = False
+    cbf_axes: str = ""
+    cbf_offset: str = ""
+    grip_closed: float = 1.5
 
 
 @dataclass
@@ -254,28 +263,7 @@ def normalizer_stats(preprocessor) -> dict:
     raise RuntimeError("preprocessor has no normalizer step to read stats from")
 
 
-def attach_selector(ctx, cfg: DetAugConfig):
-    policy = ctx.policy.policy
-    device = policy.config.device
-    rng = np.random.default_rng(cfg.seed)
-
-    if not policy.config.cond_dim:
-        raise ValueError("checkpoint has no bend conditioning; nothing to search over")
-
-    stats = normalizer_stats(ctx.policy.preprocessor)
-    if "bend" not in stats:
-        raise ValueError("checkpoint carries no bend stats to bound the candidates")
-    sel = PiperSelector(
-        stats[ACTION],
-        stats[OBS_STATE],
-        joint_start=policy.state_dim,
-        device=device,
-        hold=cfg.hold,
-        hold_offset=cfg.hold_offset,
-        radius=cfg.radius,
-        camera_radius=cfg.camera_radius,
-    )
-
+def connect_tracker(cfg: DetAugConfig) -> tuple[ObstacleClient, ObstacleGuard | None]:
     client = ObstacleClient(cfg.obstacle_url)
     client.start()
     logger.info("Waiting up to %.0fs for %s ...", cfg.wait, cfg.obstacle_url)
@@ -298,19 +286,53 @@ def attach_selector(ctx, cfg: DetAugConfig):
             logger.info(
                 "tracker recalibrated %d times before start", guard.recalibrations
             )
+    return client, guard
+
+
+def current_obstacle(client, guard, cfg: DetAugConfig) -> np.ndarray | None:
+    if cfg.collision == "pointcloud":
+        return client.cloud()
+    assert guard is not None
+    box = guard.current()
+    if box is None:
+        return None
+    box = box.copy()
+    box[3:6] += cfg.margin
+    return box
+
+
+def attach_selector(ctx, cfg: DetAugConfig):
+    policy = ctx.policy.policy
+    device = policy.config.device
+    rng = np.random.default_rng(cfg.seed)
+
+    if not policy.config.cond_dim:
+        raise ValueError("checkpoint has no bend conditioning; nothing to search over")
+
+    stats = normalizer_stats(ctx.policy.preprocessor)
+    if "bend" not in stats:
+        raise ValueError("checkpoint carries no bend stats to bound the candidates")
+    sel = PiperSelector(
+        stats[ACTION],
+        stats[OBS_STATE],
+        joint_start=policy.state_dim,
+        device=device,
+        hold=cfg.hold,
+        hold_offset=cfg.hold_offset,
+        radius=cfg.radius,
+        camera_radius=cfg.camera_radius,
+    )
+
+    client, guard = connect_tracker(cfg)
 
     def refresh() -> bool:
+        ob = current_obstacle(client, guard, cfg)
         if cfg.collision == "pointcloud":
-            cloud = client.cloud()
-            sel.set_cloud(cloud)
-            return cloud is not None
-        assert guard is not None
-        box = guard.current()
-        if box is None:
+            sel.set_cloud(ob)
+            return ob is not None
+        if ob is None:
             return False
-        box = box.copy()
-        box[3:6] += cfg.margin
-        sel.set_boxes(box)
+        sel.set_boxes(ob)
         return True
 
     drawn: dict[str, torch.Tensor] = {}
@@ -456,6 +478,163 @@ def attach_selector(ctx, cfg: DetAugConfig):
     return client, save
 
 
+class ObstacleFeed:
+    def __init__(self):
+        self.ob: np.ndarray | None = None
+        self.warned = 0.0
+
+
+def attach_cbf(ctx, cfg: DetAugConfig, fps: float):
+    policy = ctx.policy.policy
+    device = policy.config.device
+    kw: dict = {}
+    if cfg.cbf_axes:
+        kw["axes"] = [float(v) for v in cfg.cbf_axes.split(",")]
+    if cfg.cbf_offset:
+        kw["offset"] = [float(v) for v in cfg.cbf_offset.split(",")]
+    cbf = PiperCBF(
+        device,
+        alpha=cfg.cbf_alpha,
+        dt=1.0 / fps,
+        arm=cfg.cbf_arm,
+        radius=cfg.radius,
+        camera_radius=cfg.camera_radius,
+        **kw,
+    )
+    cbf.margin = cfg.cbf_margin
+    n_arm = cbf.njoints
+    held = cbf.held(cfg.hold_offset)
+
+    client, guard = connect_tracker(cfg)
+    state = ObstacleFeed()
+    stop = threading.Event()
+
+    def refresh():
+        ob = current_obstacle(client, guard, cfg)
+        if ob is None:
+            if time.time() - state.warned > cfg.recal_timeout:
+                state.warned = time.time()
+                logger.warning("no fresh obstacle; filtering against the last one")
+            return
+        last = state.ob
+        if last is not None and last.shape == ob.shape and np.array_equal(last, ob):
+            return
+        if cfg.collision == "pointcloud":
+            cbf.set_cloud(ob)
+        else:
+            cbf.set_boxes([ob[None]])
+        state.ob = ob
+
+    def watch():
+        while not stop.is_set():
+            refresh()
+            stop.wait(client.period)
+
+    refresh()
+    if state.ob is None:
+        raise RuntimeError("tracker published no usable obstacle to filter against")
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+
+    trace: dict[str, list] = {
+        "obs": [],
+        "nominal": [],
+        "act": [],
+        "h": [],
+        "box": [],
+        "step_time": [],
+    }
+    stats = {"steps": 0, "active": 0, "h_min": np.inf}
+
+    engine = ctx.policy.inference
+    inner_get = engine.get_action
+
+    def get_action(obs_frame):
+        action = inner_get(obs_frame)
+        if action is None or obs_frame is None:
+            return action
+        obs = np.asarray(obs_frame[OBS_STATE], np.float32).reshape(-1)
+        nominal = action.detach().cpu().numpy().reshape(-1).copy()
+        q = torch.deg2rad(torch.as_tensor(obs[:n_arm], device=device))[None]
+        target = torch.deg2rad(torch.as_tensor(nominal[:n_arm], device=device))[None]
+        attach = None
+        if cfg.hold > 0 and float(nominal[n_arm]) < cfg.grip_closed:
+            attach = (held, cfg.hold)
+        dq, h = cbf.filter(q, target - q, attach)
+        filtered = torch.rad2deg(q + dq)[0].cpu().numpy()
+        out = action.clone()
+        out[:n_arm] = torch.as_tensor(filtered, dtype=out.dtype)
+        moved = float(np.abs(filtered - nominal[:n_arm]).max()) > 1e-4
+        stats["steps"] += 1
+        stats["active"] += int(moved)
+        stats["h_min"] = min(stats["h_min"], float(h[0]))
+        if moved and stats["active"] % 20 == 1:
+            logger.info(
+                "cbf active: h %.3f, max joint edit %.2f deg",
+                float(h[0]),
+                float(np.abs(filtered - nominal[:n_arm]).max()),
+            )
+        trace["obs"].append(obs)
+        trace["nominal"].append(nominal)
+        trace["act"].append(out.numpy().reshape(-1).copy())
+        trace["h"].append(float(h[0]))
+        ob = state.ob
+        trace["box"].append(
+            ob if cfg.collision != "pointcloud" else np.full(7, np.nan, np.float32)
+        )
+        trace["step_time"].append(time.time())
+        return out
+
+    engine.get_action = get_action
+    logger.info(
+        "aegis cbf: alpha %.1f margin %.3f axes %s offset %s arm %s, %s geometry",
+        cfg.cbf_alpha,
+        cfg.cbf_margin,
+        cbf.axes.cpu().numpy().round(3),
+        cbf.offset.cpu().numpy().round(3),
+        cfg.cbf_arm,
+        cfg.collision,
+    )
+    ob = state.ob
+    if cfg.collision != "pointcloud" and ob is not None:
+        logger.info(
+            "obstacle box (base frame): centre %s half %s yaw %s",
+            ob[:3].round(3),
+            ob[3:6].round(3),
+            ob[6:].round(3),
+        )
+
+    def save():
+        stop.set()
+        thread.join(timeout=2.0)
+        if stats["steps"]:
+            logger.info(
+                "cbf: %d steps, active on %d (%.0f%%), min h %.3f",
+                stats["steps"],
+                stats["active"],
+                100.0 * stats["active"] / stats["steps"],
+                stats["h_min"],
+            )
+        if not cfg.dump or not trace["act"]:
+            return
+        path = Path(cfg.dump)
+        if path.is_dir() or not path.suffix:
+            path = path / f"cbf-{time.strftime('%Y%m%d-%H%M%S')}.npz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = {
+            k: np.stack(v) if k != "step_time" else np.asarray(v)
+            for k, v in trace.items()
+        }
+        out["alpha"] = np.asarray(cfg.cbf_alpha)
+        out["margin"] = np.asarray(cfg.cbf_margin)
+        out["axes"] = cbf.axes.cpu().numpy()
+        out["offset"] = cbf.offset.cpu().numpy()
+        np.savez_compressed(path, **out)  # ty: ignore[invalid-argument-type]
+        logger.info("wrote %s (%d steps)", path, len(trace["act"]))
+
+    return client, save
+
+
 @parser.wrap()
 def rollout(cfg: DetAugRolloutConfig):
     init_logging()
@@ -475,7 +654,9 @@ def rollout(cfg: DetAugRolloutConfig):
 
     client = save = None
     try:
-        if cfg.detaug.obstacle_url:
+        if cfg.detaug.obstacle_url and cfg.detaug.cbf:
+            client, save = attach_cbf(ctx, cfg.detaug, cfg.fps)
+        elif cfg.detaug.obstacle_url:
             client, save = attach_selector(ctx, cfg.detaug)
         strategy.setup(ctx)
         strategy.run(ctx)
