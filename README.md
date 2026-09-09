@@ -71,7 +71,6 @@ pixi run python -m detaug.perception.track_obstacle
 Calibration files are loaded from `outputs/perception/`. Regenerate them when
 the setup changes:
 
-- `select_top_roi`: overhead-camera crop. Rerun if the working view changes.
 - `calibrate_cameras`: wrist camera relative to the overhead camera. Rerun if
   either camera moves.
 - `calibrate_robot_frame`: overhead camera relative to the Piper base. Rerun if

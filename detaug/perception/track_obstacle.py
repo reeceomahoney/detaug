@@ -20,12 +20,10 @@ from .point_cloud_stream import (
     draw_projected_camera_box,
 )
 from .rig import CALIBRATION_DIR, LEFT_CAMERA_SERIAL, MODEL_ID, TOP_CAMERA_SERIAL
-from .select_top_roi import CropRegion, load_region
 
 TARGET_DIR = CALIBRATION_DIR / "targets"
 CAMERA_CALIBRATION_PATH = CALIBRATION_DIR / "top_from_left.json"
 ROBOT_CALIBRATION_PATH = CALIBRATION_DIR / "base_from_top.json"
-TOP_ROI_PATH = CALIBRATION_DIR / "top_roi.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +43,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--target-dir", type=Path, default=TARGET_DIR)
-    parser.add_argument("--top-roi", type=Path, default=TOP_ROI_PATH)
     parser.add_argument(
         "--camera-calibration",
         type=Path,
@@ -73,37 +70,6 @@ def intrinsics_to_dict(intrinsics) -> dict[str, object]:
         "model": str(intrinsics.model).split(".")[-1],
         "coeffs": [float(value) for value in intrinsics.coeffs],
     }
-
-
-def crop_rgbd(
-    image: np.ndarray,
-    depth_m: np.ndarray,
-    intrinsics: dict[str, object],
-    region: CropRegion,
-) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    if image.shape[:2] != (region.source_height, region.source_width):
-        raise RuntimeError(
-            f"Top color frame is {image.shape[1]}x{image.shape[0]}, expected "
-            f"{region.source_width}x{region.source_height}"
-        )
-    if depth_m.shape != image.shape[:2]:
-        raise RuntimeError("Aligned top color and depth dimensions differ")
-    y0, y1 = region.y, region.y + region.height
-    x0, x1 = region.x, region.x + region.width
-    cropped_intrinsics = dict(intrinsics)
-    cropped_intrinsics.update(
-        {
-            "width": region.width,
-            "height": region.height,
-            "ppx": cast(float, intrinsics["ppx"]) - region.x,
-            "ppy": cast(float, intrinsics["ppy"]) - region.y,
-        }
-    )
-    return (
-        image[y0:y1, x0:x1].copy(),
-        depth_m[y0:y1, x0:x1].copy(),
-        cropped_intrinsics,
-    )
 
 
 def atomic_write(path: Path, payload: bytes) -> None:
@@ -182,19 +148,15 @@ class CameraCapture:
         args: argparse.Namespace,
         board: StatusBoard,
         live_state: LiveState,
-        crop: CropRegion | None = None,
     ):
         self.name = name
         self.serial = serial
         self.args = args
         self.board = board
         self.live_state = live_state
-        self.crop = crop
         self.image: np.ndarray | None = None
         self.depth_m: np.ndarray | None = None
         self.intrinsics: dict[str, object] | None = None
-        self.source_image: np.ndarray | None = None
-        self.source_intrinsics: dict[str, object] | None = None
         self.version = 0
         self.condition = threading.Condition()
         self.stop_event = threading.Event()
@@ -215,36 +177,21 @@ class CameraCapture:
         np.ndarray | None,
         np.ndarray | None,
         dict[str, object] | None,
-        np.ndarray | None,
-        dict[str, object] | None,
         int,
     ]:
         with self.condition:
             image = None if self.image is None else self.image.copy()
             depth_m = None if self.depth_m is None else self.depth_m.copy()
             intrinsics = None if self.intrinsics is None else dict(self.intrinsics)
-            source_image = (
-                None if self.source_image is None else self.source_image.copy()
-            )
-            source_intrinsics = (
-                None if self.source_intrinsics is None else dict(self.source_intrinsics)
-            )
-            return (
-                image,
-                depth_m,
-                intrinsics,
-                source_image,
-                source_intrinsics,
-                self.version,
-            )
+            return image, depth_m, intrinsics, self.version
 
     def capture(self) -> None:
         rs: Any = importlib.import_module("pyrealsense2")
         raw_period = 1.0 / self.args.raw_fps
         last_raw = 0.0
-        width = self.crop.source_width if self.crop is not None else self.args.width
-        height = self.crop.source_height if self.crop is not None else self.args.height
-        fps = self.crop.source_fps if self.crop is not None else self.args.fps
+        width = self.args.width
+        height = self.args.height
+        fps = self.args.fps
         while not self.stop_event.is_set():
             pipeline = rs.pipeline()
             config = rs.config()
@@ -269,13 +216,10 @@ class CameraCapture:
                 started = True
                 align = rs.align(rs.stream.color)
                 scale = profile.get_device().first_depth_sensor().get_depth_scale()
-                camera_message = f"Camera live · {width}x{height}@{fps}"
-                if self.crop is not None:
-                    camera_message += (
-                        f" → {self.crop.width}x{self.crop.height} ROI at "
-                        f"{self.crop.x},{self.crop.y}"
-                    )
-                self.board.set_camera(self.name, message=camera_message)
+                self.board.set_camera(
+                    self.name,
+                    message=f"Camera live · {width}x{height}@{fps}",
+                )
                 while not self.stop_event.is_set():
                     frames = align.process(pipeline.wait_for_frames(3000))
                     color = frames.get_color_frame()
@@ -287,32 +231,17 @@ class CameraCapture:
                     intrinsics = intrinsics_to_dict(
                         depth.profile.as_video_stream_profile().intrinsics
                     )
-                    source_image = image
-                    source_intrinsics = intrinsics
-                    if self.crop is not None:
-                        image, depth_m, intrinsics = crop_rgbd(
-                            image,
-                            depth_m,
-                            intrinsics,
-                            self.crop,
-                        )
                     with self.condition:
                         self.image = image
                         self.depth_m = depth_m
                         self.intrinsics = intrinsics
-                        self.source_image = source_image
-                        self.source_intrinsics = source_intrinsics
                         self.version += 1
                         self.condition.notify_all()
                     now = time.monotonic()
                     if now - last_raw >= raw_period:
                         self.live_state.publish_image(
                             f"{self.name}_raw.jpg",
-                            encode_image(
-                                ".jpg",
-                                source_image,
-                                self.args.jpeg_quality,
-                            ),
+                            encode_image(".jpg", image, self.args.jpeg_quality),
                         )
                         last_raw = now
             except Exception as error:
@@ -466,13 +395,11 @@ class ViewTracker:
         prompt: tuple[float, float],
         args: argparse.Namespace,
         live_state: LiveState,
-        crop: CropRegion | None = None,
     ):
         self.name = name
         self.prompt = prompt
         self.args = args
         self.live_state = live_state
-        self.crop = crop
         self.session = None
         self.bootstrap_mask: np.ndarray | None = None
         self.last_output_time = 0.0
@@ -514,51 +441,13 @@ class ViewTracker:
         depth_m: np.ndarray,
         intrinsics: dict[str, object],
         mask: np.ndarray,
-        source_image: np.ndarray | None = None,
     ) -> None:
-        overlay = image.copy() if source_image is None else source_image.copy()
-        display_mask = mask
+        overlay = image.copy()
         marker = self.live_state.gripper_marker(self.name)
         camera_box = self.live_state.camera_box(self.name)
-        if self.crop is not None and source_image is not None:
-            display_mask = np.zeros(overlay.shape[:2], dtype=bool)
-            y0, y1 = self.crop.y, self.crop.y + self.crop.height
-            x0, x1 = self.crop.x, self.crop.x + self.crop.width
-            display_mask[y0:y1, x0:x1] = mask
-            if marker is not None:
-                marker = (
-                    marker[0] + self.crop.x,
-                    marker[1] + self.crop.y,
-                    marker[2],
-                )
-            if camera_box is not None:
-                camera_box = tuple(
-                    (point[0] + self.crop.x, point[1] + self.crop.y)
-                    for point in camera_box
-                )
         green = np.zeros_like(overlay)
         green[..., 1] = 255
-        overlay[display_mask] = cv2.addWeighted(
-            overlay[display_mask],
-            0.5,
-            green[display_mask],
-            0.5,
-            0.0,
-        )
-        if self.crop is not None and source_image is not None:
-            roi_overlay = overlay.copy()
-            cv2.rectangle(
-                roi_overlay,
-                (self.crop.x, self.crop.y),
-                (
-                    self.crop.x + self.crop.width - 1,
-                    self.crop.y + self.crop.height - 1,
-                ),
-                (170, 215, 235),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.addWeighted(roi_overlay, 0.35, overlay, 0.65, 0.0, overlay)
+        overlay[mask] = cv2.addWeighted(overlay[mask], 0.5, green[mask], 0.5, 0.0)
         draw_projected_camera_box(
             overlay,
             camera_box,
@@ -598,7 +487,6 @@ class ViewTracker:
         image: np.ndarray,
         depth_m: np.ndarray,
         intrinsics: dict[str, object],
-        source_image: np.ndarray | None = None,
     ) -> tuple[np.ndarray, float, float]:
         import torch
 
@@ -618,13 +506,7 @@ class ViewTracker:
         mask = masks[0][0, 0].numpy()
         score = float(output.object_score_logits.float().cpu().flatten()[0])
         visible_mask = mask if score > 0.0 else np.zeros_like(mask)
-        self.publish(
-            image,
-            depth_m,
-            intrinsics,
-            visible_mask,
-            source_image,
-        )
+        self.publish(image, depth_m, intrinsics, visible_mask)
         now = time.monotonic()
         if self.last_output_time:
             instant = 1.0 / max(now - self.last_output_time, 1e-6)
@@ -636,15 +518,12 @@ class ViewTracker:
         return visible_mask, score, self.output_fps
 
 
-def crop_prompt(
+def check_prompt(
     camera: CameraCapture, point: tuple[float, float]
 ) -> tuple[float, float]:
     x, y = point
-    if camera.crop is not None:
-        x -= camera.crop.x
-        y -= camera.crop.y
     if not (0 <= x < camera.args.width and 0 <= y < camera.args.height):
-        raise RuntimeError(f"{camera.name} click is outside the tracked region")
+        raise RuntimeError(f"{camera.name} click is outside the camera frame")
     return float(x), float(y)
 
 
@@ -656,23 +535,17 @@ def create_targets(
     points: dict[str, tuple[float, float]],
 ) -> None:
     prompts = {
-        name: crop_prompt(camera, points[name]) for name, camera in cameras.items()
+        name: check_prompt(camera, points[name]) for name, camera in cameras.items()
     }
     for name in cameras:
         board.set_camera(name, message="Target selected; creating cutout")
     board.set_phase("Creating saved target cutouts")
     model, processor, device, dtype = sam
     for name, camera in cameras.items():
-        image, depth_m, intrinsics, _, _, _ = camera.latest()
+        image, depth_m, intrinsics, _ = camera.latest()
         if image is None or depth_m is None or intrinsics is None:
             raise RuntimeError(f"{name} camera did not provide an RGB-D frame")
-        tracker = ViewTracker(
-            name,
-            prompts[name],
-            args,
-            board.live_state,
-            camera.crop,
-        )
+        tracker = ViewTracker(name, prompts[name], args, board.live_state)
         mask, score, _ = tracker.process(
             model,
             processor,
@@ -725,13 +598,7 @@ def align_trackers(
                 f"Could not find {name} target cutout: match {score:.3f} is below "
                 f"{args.match_threshold:.3f}"
             )
-        tracker = ViewTracker(
-            name,
-            prompt,
-            args,
-            board.live_state,
-            cameras[name].crop,
-        )
+        tracker = ViewTracker(name, prompt, args, board.live_state)
         tracker.bootstrap_mask = mask
         trackers[name] = tracker
         x, y, width, height = box
@@ -796,14 +663,7 @@ def track_targets(
             except Exception as error:
                 board.set_phase(f"Realignment failed: {error}")
         for name, camera in cameras.items():
-            (
-                image,
-                depth_m,
-                intrinsics,
-                source_image,
-                _,
-                version,
-            ) = camera.latest()
+            image, depth_m, intrinsics, version = camera.latest()
             if (
                 image is None
                 or depth_m is None
@@ -815,11 +675,7 @@ def track_targets(
             if name not in trackers:
                 board.live_state.publish_image(
                     f"{name}_overlay.jpg",
-                    encode_image(
-                        ".jpg",
-                        image if source_image is None else source_image,
-                        args.jpeg_quality,
-                    ),
+                    encode_image(".jpg", image, args.jpeg_quality),
                 )
                 continue
             assert sam is not None
@@ -833,7 +689,6 @@ def track_targets(
                     image,
                     depth_m,
                     intrinsics,
-                    source_image,
                 )
                 board.set_camera(
                     name,
@@ -869,29 +724,13 @@ def main() -> None:
         raise ValueError("Match threshold must be between zero and one")
     if not 0.0 < args.match_min_scale <= args.match_max_scale:
         raise ValueError("Match scale range must be positive and ordered")
-    top_roi = load_region(args.top_roi)
-    if top_roi is not None and (top_roi.width, top_roi.height) != (
-        args.width,
-        args.height,
-    ):
-        raise ValueError(
-            f"Top ROI must output {args.width}x{args.height}; got "
-            f"{top_roi.width}x{top_roi.height}"
-        )
     targets = load_targets(args) if targets_saved(args) else None
     live_state = LiveState()
     dashboard = None
     cloud_stream = None
     board = StatusBoard(live_state)
     cameras = {
-        "top": CameraCapture(
-            "top",
-            args.top_serial,
-            args,
-            board,
-            live_state,
-            top_roi,
-        ),
+        "top": CameraCapture("top", args.top_serial, args, board, live_state),
         "left": CameraCapture("left", args.left_serial, args, board, live_state),
     }
     board.start()
