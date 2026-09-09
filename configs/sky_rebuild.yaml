@@ -1,0 +1,45 @@
+name: rebuild
+
+resources:
+  infra: ssh/ori
+  accelerators: RTX4090:1
+  cpus: 14
+
+envs:
+  HF_TOKEN:
+  WANDB_API_KEY:
+  MUJOCO_GL: egl
+  HF_DATASETS_DISABLE_PROGRESS_BARS: 1
+  CMAKE_POLICY_VERSION_MINIMUM: 3.5
+  STEP: base
+workdir: .
+
+file_mounts:
+  ~/.cache/huggingface/lerobot/reece-omahoney/franka: ~/.cache/huggingface/lerobot/reece-omahoney/franka
+  ~/.cache/huggingface/lerobot/reece-omahoney/franka-transit: ~/.cache/huggingface/lerobot/reece-omahoney/franka-transit
+
+setup: |
+  curl -fsSL https://pixi.sh/install.sh | sh
+  export PATH="$HOME/.pixi/bin:$PATH"
+  cd ~/sky_workdir && pixi install
+
+run: |
+  export PATH="$HOME/.pixi/bin:$PATH"
+  SNAP=$(mktemp -d ~/snap.XXXXXX)
+  rsync -a --exclude .pixi --exclude outputs --exclude wandb ~/sky_workdir/ $SNAP/
+  ln -s ~/sky_workdir/.pixi $SNAP/.pixi; mkdir -p ~/sky_workdir/outputs; ln -s ~/sky_workdir/outputs $SNAP/outputs
+  cd $SNAP
+  grep -q "obstacle_shape" detaug/envs/franka.py || { echo "stale workdir"; exit 1; }
+  export LD_LIBRARY_PATH="$PWD/.pixi/envs/default/lib:$LD_LIBRARY_PATH"
+  q() { "$@" 2>&1 | grep --line-buffered -vE "it/s|Warning|examples/s|EGL|egl_|OpenGL|glCheck|binding_utils|raise self|^\s*$"; }
+  CACHE=~/.cache/huggingface/lerobot/reece-omahoney
+  DONE=outputs/franka/rebuild; mkdir -p $DONE
+  case $STEP in
+    base)
+      [ -f $DONE/base.done ] || { q pixi run python scripts/train.py --env.type franka --repo_id reece-omahoney/franka \
+        --cond_dim 0 --horizon 599 --num_iters 75000 --eval_every 0 --seed 0 --run_dir outputs/franka/base && touch $DONE/base.done; };;
+    aug)
+      [ -f $DONE/aug.done ] || { rm -rf $CACHE/franka-demogen-pc; q pixi run python scripts/augment.py --demogen true \
+        --src_repo reece-omahoney/franka --dst_repo reece-omahoney/franka-demogen-pc && touch $DONE/aug.done; };;
+  esac
+  rm -rf $SNAP

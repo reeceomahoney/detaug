@@ -1,0 +1,49 @@
+name: obscan
+
+resources:
+  infra: ssh/ori
+  accelerators: RTX4090:1
+  cpus: 14
+
+envs:
+  HF_TOKEN:
+  WANDB_API_KEY:
+  MUJOCO_GL: egl
+  HF_DATASETS_DISABLE_PROGRESS_BARS: 1
+  CMAKE_POLICY_VERSION_MINIMUM: 3.5
+  MODELS: "base oursfull"
+  SHAPES: "sphere,0.10,0 sphere,0.15,0 cylinder,0.05,0.30 cylinder,0.05,0.40 capsule,0.05,0.35"
+  EPS: 2
+workdir: .
+
+setup: |
+  curl -fsSL https://pixi.sh/install.sh | sh
+  export PATH="$HOME/.pixi/bin:$PATH"
+  cd ~/sky_workdir && pixi install
+
+run: |
+  export PATH="$HOME/.pixi/bin:$PATH"
+  SNAP=$(mktemp -d ~/snap.XXXXXX)
+  rsync -a --exclude .pixi --exclude outputs --exclude wandb ~/sky_workdir/ $SNAP/
+  ln -s ~/sky_workdir/.pixi $SNAP/.pixi; mkdir -p ~/sky_workdir/outputs; ln -s ~/sky_workdir/outputs $SNAP/outputs
+  cd $SNAP
+  grep -q "obstacle_shape" detaug/envs/franka.py || { echo "stale workdir"; exit 1; }
+  export LD_LIBRARY_PATH="$PWD/.pixi/envs/default/lib:$LD_LIBRARY_PATH"
+  model_args() { case $1 in
+    base) echo "outputs/franka/2026-08-13/02-10-06 franka-transit --cond sample --n_cond 1";;
+    oursfrozen) echo "outputs/franka/graft/detaug-frozen-s0 franka-transit --cond search --n_cond 8";;
+    oursfull) echo "outputs/franka/graft/detaug-full-s0 franka-transit --cond search --n_cond 8";;
+    dgfrozen) echo "outputs/franka/graft/demogen-frozen-s0 franka-demogen-pc --cond cloud --n_cond 1";;
+    dgfull) echo "outputs/franka/graft/demogen-full-s0 franka-demogen-pc --cond cloud --n_cond 1";;
+  esac; }
+  OUT=outputs/franka/obscan; mkdir -p $OUT
+  for M in $MODELS; do for S in $SHAPES; do
+    IFS=, read shape w h <<< "$S"
+    f=$OUT/${M}_${shape}_w${w}_h${h}.log
+    grep -q "^overall" $f 2>/dev/null && { echo "skip $f"; continue; }
+    set -- $(model_args $M); ck=$1; repo=$2; shift 2
+    pixi run python scripts/eval.py --env.type franka --env.world_count 128 --episodes $EPS --repo_id reece-omahoney/$repo \
+      --checkpoint $ck --env.obstacle true --env.obstacle_shape $shape --env.obstacle_width $w --env.obstacle_height $h "$@" > $f 2>&1
+    echo "$(basename $f .log) $(grep -aE '^overall: success|Traceback|Error' $f | head -2 | tr '\n' ' ')"
+  done; done
+  rm -rf $SNAP

@@ -66,6 +66,7 @@ class FrankaConfig(EnvConfig):
     contact_depth: float = 0.005  # penetration below this is a graze, not a failure
     obstacle_dx: float = 0.0  # test-time shift of the obstacle from the table centre
     obstacle_dy: float = 0.0
+    obstacle_shape: str = "box"
 
     # keep cube/goal at least this far from the wall plane (feasible instances);
     # 0 = unconstrained. Wall-adjacent grasps (<8cm) are physically infeasible.
@@ -108,6 +109,24 @@ def box_pointcloud(centers, halves, table_height: float, res: int = 160, fov=60.
     tn[(tf < tn) | (tn <= 0)] = np.inf
     t = tn.min(1)
     return voxel_filter((eye + dirs * t[:, None])[np.isfinite(t)], table_height)
+
+
+def shape_surface_cloud(shape, center, radius, half_height, table_height, n=6000):
+    rng = np.random.default_rng(0)
+    u = rng.uniform(0, 2 * np.pi, n)
+    if shape == "sphere":
+        z = rng.uniform(-1, 1, n)
+        r = np.sqrt(1 - z * z)
+        pts = np.stack([r * np.cos(u), r * np.sin(u), z], 1) * radius
+    else:
+        side = np.stack([np.cos(u), np.sin(u), np.zeros(n)], 1) * radius
+        side[:, 2] = rng.uniform(-half_height, half_height, n)
+        m = n // 4
+        a = rng.uniform(0, 2 * np.pi, m)
+        rr = radius * np.sqrt(rng.uniform(0, 1, m))
+        cap = np.stack([rr * np.cos(a), rr * np.sin(a), np.full(m, half_height)], 1)
+        pts = np.concatenate([side, cap])
+    return voxel_filter(pts + np.asarray(center, np.float32), table_height)
 
 
 def subsample_cloud(pts, n: int, rng) -> np.ndarray:
@@ -217,7 +236,7 @@ class FrankaEnv:
         self.obstacle_center = wp.vec3(
             top[0] + cfg.obstacle_dx,
             top[1] + cfg.obstacle_dy,
-            top[2] + 0.5 * cfg.obstacle_height,
+            top[2] + self.obstacle_geometry["half_extents"][2],
         )
 
         franka = self.build_franka_with_table()
@@ -325,16 +344,28 @@ class FrankaEnv:
             cfg=shape_cfg,
         )
         if self.cfg.obstacle:
-            builder.add_shape_box(
+            kw = dict(
                 body=-1,
-                hx=self.cfg.obstacle_width,
-                hy=self.cfg.obstacle_thickness,
-                hz=0.5 * self.cfg.obstacle_height,
                 xform=wp.transform(self.obstacle_center, wp.quat_identity()),
                 cfg=shape_cfg,
                 label="obstacle",
                 color=[0.5, 0.5, 0.5],
             )
+            shape = self.cfg.obstacle_shape
+            r, hh = self.obstacle_radius_hh
+            if shape == "box":
+                builder.add_shape_box(
+                    hx=self.cfg.obstacle_width,
+                    hy=self.cfg.obstacle_thickness,
+                    hz=0.5 * self.cfg.obstacle_height,
+                    **kw,
+                )
+            elif shape == "sphere":
+                builder.add_shape_sphere(radius=r, **kw)
+            elif shape == "cylinder":
+                builder.add_shape_cylinder(radius=r, half_height=hh, **kw)
+            else:
+                raise ValueError(shape)
         return builder
 
     def build_scene(self, franka: newton.ModelBuilder):
@@ -423,11 +454,9 @@ class FrankaEnv:
         pos = np.tile(center, (n, 1)).astype(np.float32)
         pos[:, 0] += self.rng.uniform(-self.cfg.jitter, self.cfg.jitter, n)
         pos[:, 1] += self.rng.uniform(-self.cfg.jitter, self.cfg.jitter, n)
-        m = (
-            self.cfg.sample_wall_margin
-            + self.cfg.obstacle_thickness
-            - self.cfg.obstacle_thickness
-        )
+        m = self.cfg.sample_wall_margin
+        if self.cfg.obstacle_shape != "box":
+            m += self.obstacle_geometry["half_extents"][1]
         if m > 0 and self.cfg.obstacle:
             wall_y = self.obstacle_center[1]
             if center[1] > wall_y:  # cube side
@@ -633,19 +662,33 @@ class FrankaEnv:
 
     # -------------------------------------------------------------- selector
     @property
+    def obstacle_radius_hh(self):
+        return self.cfg.obstacle_width, 0.5 * self.cfg.obstacle_height
+
+    @property
     def obstacle_geometry(self):
-        """Obstacle box [center(3), half_extents(3)] for the plan selector."""
-        return {
-            "center": list(self.obstacle_center),
-            "half_extents": [
-                self.cfg.obstacle_width,
-                self.cfg.obstacle_thickness,
-                0.5 * self.cfg.obstacle_height,
-            ],
-        }
+        """Obstacle bounding box [center(3), half_extents(3)] for the plan selector."""
+        shape, r = self.cfg.obstacle_shape, self.cfg.obstacle_width
+        if shape == "box":
+            half = [r, self.cfg.obstacle_thickness, 0.5 * self.cfg.obstacle_height]
+        elif shape == "sphere":
+            half = [r, r, r]
+        else:
+            half = [r, r, 0.5 * self.cfg.obstacle_height]
+        center = (
+            list(self.obstacle_center)
+            if hasattr(self, "obstacle_center")
+            else [0.0, 0.0, 0.0]
+        )
+        return {"center": center, "half_extents": half}
 
     def scene_pointcloud(self, res: int = 160, fov: float = 60.0):
         g = self.obstacle_geometry
+        if self.cfg.obstacle_shape != "box":
+            r, hh = self.obstacle_radius_hh
+            return shape_surface_cloud(
+                self.cfg.obstacle_shape, g["center"], r, hh, self.cfg.table_height
+            )
         table = [list(self.table_pos)], [[0.4, 0.4, 0.5 * self.cfg.table_height]]
         return box_pointcloud(
             [g["center"], *table[0]],
