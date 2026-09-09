@@ -1,16 +1,19 @@
 import json
+import sys
 from pathlib import Path
 
 import draccus
 import matplotlib
 import numpy as np
 import pyarrow.parquet as pq
-from augment import Config
 
 from detaug.bend import EE, bend_delta, transit_segments
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+
+sys.path.append(str(Path(__file__).parents[1]))
+from augment import Config  # noqa: E402
 
 EPISODE = 0
 COPIES = 8

@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -6,7 +7,6 @@ import draccus
 import numpy as np
 import pytorch_kinematics as pk
 import torch
-from augment import DEV, Config, libero_candidates, libero_demos, libero_solve
 from robosuite.utils.camera_utils import (
     get_camera_transform_matrix,
     project_points_from_world_to_camera,
@@ -15,6 +15,15 @@ from robosuite.utils.camera_utils import (
 from detaug.envs.libero import LiberoConfig, LiberoEnv
 from detaug.kinematics import EE_FRAME, build_franka_chain
 from detaug.selector import FrankaCollision
+
+sys.path.append(str(Path(__file__).parents[1]))
+from augment import (  # noqa: E402
+    DEV,
+    Config,
+    libero_candidates,
+    libero_demos,
+    libero_solve,
+)
 
 GREY, GREEN, RED = (160, 160, 160), (0, 220, 0), (0, 0, 255)
 

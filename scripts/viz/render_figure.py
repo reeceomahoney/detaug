@@ -1,4 +1,6 @@
+import sys
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import cv2
 import draccus
@@ -7,7 +9,6 @@ import newton.viewer
 import numpy as np
 import pyglet
 import warp as wp
-from augment import sdf_np
 from scipy.ndimage import gaussian_filter
 
 import detaug.envs.franka as franka
@@ -20,6 +21,9 @@ ORANGE = (1.0, 0.4, 0.0)
 VISUAL = newton.ModelBuilder.ShapeConfig(
     density=0.0, has_shape_collision=False, has_particle_collision=False
 )
+
+sys.path.append(str(Path(__file__).parents[1]))
+from augment import sdf_np  # noqa: E402
 
 
 def hide_last_shape(builder):

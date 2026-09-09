@@ -1,4 +1,6 @@
+import sys
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import cv2
 import draccus
@@ -7,12 +9,14 @@ import newton.viewer
 import numpy as np
 import pyglet
 import warp as wp
-from augment import sdf_np
 from render_figure import FigureEnv, render, run_to_phase
 
 import detaug.envs.franka as franka
 from detaug.bend import bend_delta
 from detaug.envs.franka import FrankaConfig, TaskType
+
+sys.path.append(str(Path(__file__).parents[1]))
+from augment import sdf_np  # noqa: E402
 
 BLUE, GREY = (0.2, 0.45, 0.9), (0.55, 0.15, 0.12)
 
