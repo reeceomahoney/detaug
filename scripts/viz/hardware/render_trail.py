@@ -33,8 +33,8 @@ class Config:
     fill_feather: int = 30
     decoy_via: str = "480,620;520,545;480,780"
     decoy_trim: int = 4
-    decoy_rgb: tuple[int, int, int] = field(default_factory=lambda: (150, 150, 150))
-    dot_rgb: tuple[int, int, int] = field(default_factory=lambda: (40, 110, 255))
+    decoy_rgb: tuple[int, int, int] = field(default_factory=lambda: (187, 187, 187))
+    dot_rgb: tuple[int, int, int] = field(default_factory=lambda: (68, 119, 170))
     dpi: int = 600
 
 
