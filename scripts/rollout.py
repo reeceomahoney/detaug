@@ -20,6 +20,7 @@ from lerobot.utils.process import ProcessSignalHandler
 from lerobot.utils.utils import init_logging
 from lerobot.utils.visualization_utils import init_visualization, shutdown_visualization
 
+from detaug.cape import PiperCape
 from detaug.cbf import PiperCBF
 from detaug.perception.client import ObstacleClient
 from detaug.selector import PiperSelector
@@ -56,6 +57,15 @@ class DetAugConfig:
     cbf_axes: str = ""
     cbf_offset: str = ""
     grip_closed: float = 1.5
+    cape: bool = False
+    cape_scale: float = 3.0
+    cape_prefix: int = 2
+    cape_delta: float = 0.08
+    cape_chi: float = 0.8
+    cape_stretch: bool = False
+    cape_radius: float = 0.08
+    cape_margin: float = 0.02
+    cape_min_travel: float = 5.0
 
 
 @dataclass
@@ -670,6 +680,176 @@ def attach_cbf(ctx, cfg: DetAugConfig, fps: float):
     return client, save
 
 
+def attach_cape(ctx, cfg: DetAugConfig):
+    policy = ctx.policy.policy
+    device = policy.config.device
+    stats = normalizer_stats(ctx.policy.preprocessor)
+    cape = PiperCape(
+        device,
+        stats[ACTION],
+        stats[OBS_STATE],
+        policy.state_dim,
+        radius=cfg.cape_radius,
+        margin=cfg.cape_margin,
+    )
+    policy.config.n_action_steps = cfg.cape_prefix
+    policy.reset()
+    policy.guidance, policy.guide_scale = cape.grad, cfg.cape_scale
+    policy.guide_from, policy.prior_delta = cfg.cape_chi, cfg.cape_delta
+    policy.prior_stretch = cfg.cape_stretch
+
+    client, guard = connect_tracker(cfg)
+    state = ObstacleFeed()
+
+    def refresh() -> bool:
+        ob = current_obstacle(client, guard, cfg)
+        if ob is None:
+            if time.time() - state.warned > cfg.recal_timeout:
+                state.warned = time.time()
+                logger.warning("no fresh obstacle; guiding against the last one")
+            return False
+        last = state.ob
+        if last is not None and last.shape == ob.shape and np.array_equal(last, ob):
+            return True
+        if cfg.collision == "pointcloud":
+            cape.set_cloud(ob)
+        else:
+            cape.set_boxes([ob])
+        state.ob = ob
+        return True
+
+    refresh()
+    if state.ob is None:
+        raise RuntimeError("tracker published no usable obstacle to guide against")
+
+    trace: dict[str, list] = {
+        "box": [],
+        "cost": [],
+        "fresh": [],
+        "still": [],
+        "plan": [],
+        "obs": [],
+        "act": [],
+        "step_time": [],
+    }
+    n_arm = cape.n
+    js = policy.state_dim
+    asd = torch.as_tensor(stats[ACTION]["std"][:n_arm], device=device)
+
+    def travel(plan) -> float:
+        q = plan[0, :, js : js + n_arm] * asd
+        return float((q.amax(0) - q.amin(0)).max())
+
+    inner_chunk = policy.predict_action_chunk
+
+    def predict_action_chunk(batch, **kwargs):
+        fresh = refresh()
+        seeded = policy.plan is not None
+        chunk = inner_chunk(batch, **kwargs)
+        cost = float(cape.cost(policy.plan)[0])
+        still = travel(policy.plan) < cfg.cape_min_travel
+        trace["plan"].append(policy.plan[0].cpu().numpy())
+        trace["cost"].append(cost)
+        trace["fresh"].append(fresh)
+        trace["still"].append(still)
+        ob = state.ob
+        trace["box"].append(
+            ob if cfg.collision != "pointcloud" else np.full(7, np.nan, np.float32)
+        )
+        n = len(trace["cost"])
+        if still:
+            policy.plan = None
+            logger.info(
+                "replan %d: plan travels < %.1f deg (%s), dropping the prior",
+                n,
+                cfg.cape_min_travel,
+                "refined" if seeded else "fresh draw",
+            )
+        elif cost > 0 or n % 50 == 1:
+            logger.info(
+                "replan %d: cape residual cost %.4f%s",
+                n,
+                cost,
+                "" if fresh else "  [STALE obstacle]",
+            )
+        return chunk
+
+    policy.predict_action_chunk = predict_action_chunk
+
+    engine = ctx.policy.inference
+    inner_get = engine.get_action
+
+    def get_action(obs_frame):
+        action = inner_get(obs_frame)
+        if action is None or obs_frame is None:
+            return action
+        obs = np.asarray(obs_frame[OBS_STATE], np.float32).reshape(-1)
+        trace["obs"].append(obs)
+        trace["act"].append(action.detach().cpu().numpy().reshape(-1).copy())
+        trace["step_time"].append(time.time())
+        return action
+
+    engine.get_action = get_action
+    logger.info(
+        "cape: scale %.2f delta %.3f chi %.2f prefix %d %s keep-out %.3f m, "
+        "%s geometry",
+        cfg.cape_scale,
+        cfg.cape_delta,
+        cfg.cape_chi,
+        cfg.cape_prefix,
+        "stretch" if cfg.cape_stretch else "hold",
+        cfg.cape_radius + cfg.cape_margin,
+        cfg.collision,
+    )
+    ob = state.ob
+    if cfg.collision != "pointcloud" and ob is not None:
+        logger.info(
+            "obstacle box (base frame): centre %s half %s yaw %s",
+            ob[:3].round(3),
+            ob[3:6].round(3),
+            ob[6:].round(3),
+        )
+
+    def save():
+        n = len(trace["cost"])
+        if n:
+            hit = sum(c > 0 for c in trace["cost"])
+            logger.info(
+                "cape: %d replans, %d with residual cost (max %.4f), %d stale, "
+                "%d still draws dropped",
+                n,
+                hit,
+                max(trace["cost"]),
+                n - sum(trace["fresh"]),
+                sum(trace["still"]),
+            )
+        if not cfg.dump or not trace["act"]:
+            return
+        path = Path(cfg.dump)
+        if path.is_dir() or not path.suffix:
+            path = path / f"cape-{time.strftime('%Y%m%d-%H%M%S')}.npz"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = {
+            k: np.stack(v)
+            if k not in ("cost", "fresh", "still", "step_time")
+            else np.asarray(v)
+            for k, v in trace.items()
+        }
+        out["n_action_steps"] = np.asarray(policy.config.n_action_steps)
+        out["state_dim"] = np.asarray(policy.state_dim)
+        out["scale"] = np.asarray(cfg.cape_scale)
+        out["delta"] = np.asarray(cfg.cape_delta)
+        out["chi"] = np.asarray(cfg.cape_chi)
+        out["keep_out"] = np.asarray(cfg.cape_radius + cfg.cape_margin)
+        for key in (OBS_STATE, ACTION):
+            for stat in ("mean", "std"):
+                out[f"{key}.{stat}"] = stats[key][stat]
+        np.savez_compressed(path, **out)  # ty: ignore[invalid-argument-type]
+        logger.info("wrote %s (%d replans, %d steps)", path, n, len(trace["act"]))
+
+    return client, save
+
+
 @parser.wrap()
 def rollout(cfg: DetAugRolloutConfig):
     init_logging()
@@ -689,8 +869,11 @@ def rollout(cfg: DetAugRolloutConfig):
 
     client = save = None
     try:
+        assert not (cfg.detaug.cbf and cfg.detaug.cape), "pick one of cbf, cape"
         if cfg.detaug.obstacle_url and cfg.detaug.cbf:
             client, save = attach_cbf(ctx, cfg.detaug, cfg.fps)
+        elif cfg.detaug.obstacle_url and cfg.detaug.cape:
+            client, save = attach_cape(ctx, cfg.detaug)
         elif cfg.detaug.obstacle_url:
             client, save = attach_selector(ctx, cfg.detaug)
         strategy.setup(ctx)

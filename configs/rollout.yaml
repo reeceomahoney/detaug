@@ -17,7 +17,7 @@ robot:
   arms: [right]
 
 policy:
-  path: reece-omahoney/piper-pick-and-place-aug
+  path: reece-omahoney/piper-pick-and-place
   n_action_steps: 20
 
 detaug:
@@ -33,6 +33,7 @@ detaug:
   max_jump: 0.05
   dump: outputs/rollout
   cbf: false
+  cape: false
 
 
 fps: 20
