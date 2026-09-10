@@ -121,7 +121,7 @@ for ax, d in zip(axes, DEMOS):
             e[:, (i + 2) % 3] = b[(i + 2) % 3]
             if (e == near).all(1).any():
                 continue
-            ax.plot(*e.T, color="#dddddd", lw=0.5, zorder=0, clip_on=False)
+            ax.plot(*e.T, color="#cccccc", lw=0.8, zorder=0, clip_on=False)
 fig.legend(
     handles=[
         plt.Line2D([], [], color=COLOR["orig"], lw=1.2, label="demo"),
