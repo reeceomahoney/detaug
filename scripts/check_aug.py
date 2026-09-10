@@ -1,6 +1,8 @@
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from itertools import product
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -144,6 +146,7 @@ def phase_report(prof, segs, m):
 
 
 def frame(env, t, done=None):
+    sys.path.append(str(Path(__file__).parent / "viz"))
     from view_aug import draw, project
 
     f = np.ascontiguousarray(env.obs[0]["agentview_image"][::-1, ::-1])

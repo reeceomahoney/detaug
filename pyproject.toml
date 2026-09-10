@@ -80,6 +80,9 @@ sky launch configs/sky.yaml -c flow -y --env HF_TOKEN --env WANDB_API_KEY
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.ty.environment]
+extra-paths = ["scripts/viz"]
+
 # transformers decorates `.to`, which type checkers cannot follow
 [[tool.ty.overrides]]
 include = ["scripts/viz/hardware/edit_mask.py"]
