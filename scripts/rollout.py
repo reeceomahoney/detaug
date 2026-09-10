@@ -312,6 +312,7 @@ def attach_selector(ctx, cfg: DetAugConfig):
     stats = normalizer_stats(ctx.policy.preprocessor)
     if "bend" not in stats:
         raise ValueError("checkpoint carries no bend stats to bound the candidates")
+    oracle = policy.config.cond_dim == 6
     sel = PiperSelector(
         stats[ACTION],
         stats[OBS_STATE],
@@ -386,14 +387,46 @@ def attach_selector(ctx, cfg: DetAugConfig):
         )
         return s
 
-    policy.selector_fn = score
+    def box_cond():
+        b = sel.box.reshape(-1, sel.box.shape[-1])[0]
+        half = b[3:6]
+        if b.shape[0] > 6:
+            cos, sin = torch.cos(b[6]).abs(), torch.sin(b[6]).abs()
+            half = torch.stack(
+                [
+                    half[0] * cos + half[1] * sin,
+                    half[0] * sin + half[1] * cos,
+                    half[2],
+                ]
+            )
+        return torch.cat([b[:3], half])[None]
+
+    policy.selector_fn = None if oracle else score
     policy.deviation = cfg.deviation
-    policy.cond_candidates = draw if cfg.resample else draw()
+    if not oracle:
+        policy.cond_candidates = draw if cfg.resample else draw()
 
     inner_chunk = policy.predict_action_chunk
 
     def predict_action_chunk(batch, **kwargs):
+        if oracle:
+            fresh = refresh()
+            cond = box_cond()
+            policy.cond_candidates = cond
+            trace["box"].append(sel.box.reshape(-1, sel.box.shape[-1])[0].cpu().numpy())
+            trace["labels"].append(cond.cpu().numpy())
+            trace["fresh"].append(fresh)
         chunk = inner_chunk(batch, **kwargs)
+        if oracle:
+            v = sel.score(policy.plan).detach().cpu().numpy()
+            trace["costs"].append(v)
+            logger.info(
+                "replan %d: box %s cost %.3f%s",
+                len(trace["costs"]),
+                np.round(cond[0].cpu().numpy(), 3),
+                float(v[0]),
+                "" if fresh else "  [STALE obstacle]",
+            )
         if len(trace["costs"]) > len(trace["plan"]):  # a replan just landed
             trace["plan"].append(policy.plan[0].cpu().numpy())
             idx = policy.latched_idx
@@ -432,7 +465,9 @@ def attach_selector(ctx, cfg: DetAugConfig):
         "bend support %s..%s, candidates:\n%s",
         np.round(b["min"], 2),
         np.round(b["max"], 2),
-        np.round(policy.cond_candidates.cpu().numpy(), 2)
+        "the observed box"
+        if oracle
+        else np.round(policy.cond_candidates.cpu().numpy(), 2)
         if torch.is_tensor(policy.cond_candidates)
         else "resampled each replan",
     )

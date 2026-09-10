@@ -33,7 +33,7 @@ from detaug.envs import EnvConfig, FrankaConfig
 from detaug.envs.env import PiperConfig
 from detaug.kinematics import EE_FRAME, build_franka_chain, build_piper_chain
 from detaug.plan import retime, rrt_connect, shortcut, smooth_pinned
-from detaug.selector import FrankaCollision, box_sdf
+from detaug.selector import FrankaCollision, PiperCollision, box_sdf
 from detaug.utils import hf_column, quat_to_rot6d, rot6d_to_quat
 
 
@@ -91,6 +91,8 @@ class Config:
     box_depth: float = 0.0
     clear_frac: float = 1.0
     oversample: int = 8
+    home_radius: float = 0.15
+    reach_margin: float = 0.03
 
     filter: bool = False
     postures: int = 0
@@ -954,6 +956,47 @@ def lag_states(x, chain, base, alpha):
     return new.astype(np.float32)
 
 
+def plan_piper_box(x, radii, reach, rng, cfg, segs):
+    pts, tip_off = x["pts"], x["pts"][:, -1] - x["ee"]
+    inside = np.zeros(len(pts), bool)
+    for s0, s1 in segs:
+        inside[s0:s1] = True
+    idx = np.flatnonzero(inside)
+    w = np.concatenate([[0.0], np.linalg.norm(np.diff(pts[idx, -1], axis=0), axis=1)])
+    phis = np.pi * np.concatenate([[0.0], np.linspace(cfg.bend_min, cfg.bend_max, 18)])
+
+    def clears(s0, s1, phi, theta, center, half):
+        d = bend_delta(x["obs_ee"], s0, s1, phi, theta)
+        path = np.stack([x["ee"] + d, x["ee"] + d + tip_off])[:, s0:s1]
+        ok = np.linalg.norm(path[0], axis=-1).max() < reach
+        return ok and sdf_np(path, center, half).min() > cfg.wall_margin, d
+
+    for _ in range(cfg.box_tries):
+        t = int(rng.choice(idx, p=w / w.sum()))
+        half = np.array([*rng.uniform(*cfg.box_xy, 2), rng.uniform(*cfg.box_h)])
+        center = np.array(
+            [*(pts[t, -1, :2] + rng.uniform(-half[:2], half[:2])), half[2]]
+        )
+        d = sdf_np(pts, center, half) - radii
+        if d[inside].min() > cfg.box_clear or d[~inside].min() < cfg.outside_margin:
+            continue
+        delta = np.zeros_like(x["ee"])
+        for s0, s1 in segs:
+            theta = rng.uniform(0.0, np.pi)
+            for j, phi in enumerate(phis):
+                ok, d = clears(s0, s1, phi, theta, center, half)
+                if ok:
+                    k = min(j + int(rng.integers(0, 3)), len(phis) - 1) if j else 0
+                    ok, dk = clears(s0, s1, phis[k], theta, center, half)
+                    delta += dk if ok else d
+                    break
+            else:
+                break
+        else:
+            return center, half, delta
+    return None
+
+
 def augment_piper(cfg):
     # ponytail: approach + carry bends, IK error + jerk as the only filters;
     # a self-collision check is the upgrade
@@ -962,6 +1005,9 @@ def augment_piper(cfg):
     chain = build_piper_chain(DEV)
     base = np.zeros(3, np.float32)
     arm = slice(0, 6)
+    pc = PiperCollision(DEV)
+    radii = pc.radii.cpu().numpy()
+    ldim = 6 if cfg.demogen else 4
 
     src = LeRobotDataset(cfg.src_repo)
     hf = src.hf_dataset
@@ -975,7 +1021,7 @@ def augment_piper(cfg):
             "names": None,
         },
         "action": {"dtype": "float32", "shape": act_all.shape[1:], "names": None},
-        "bend": {"dtype": "float32", "shape": (4,), "names": None},
+        "bend": {"dtype": "float32", "shape": (ldim,), "names": None},
     }
     dst = LeRobotDataset.create(
         repo_id=cfg.dst_repo, fps=src.fps, features=features, use_videos=False
@@ -986,6 +1032,9 @@ def augment_piper(cfg):
         np.minimum(lo, q_all.min(0)).tolist(),
         np.maximum(hi, q_all.max(0)).tolist(),
     )
+    reach = np.linalg.norm(fk(chain, rng.uniform(*limits, (4096, 6)), base)[0], axis=1)
+    reach = float(reach.max()) - cfg.reach_margin
+    print(f"reach {reach:.3f}")
 
     todo: list[dict[str, Any]] = []
     grid = np.zeros(len(ALPHAS))
@@ -995,7 +1044,7 @@ def augment_piper(cfg):
     for e in tqdm(range(n_src), desc="originals"):
         sel = epi == e
         obs, act = obs_all[sel].copy(), act_all[sel].copy()
-        write(dst, obs, act, np.zeros(4))
+        write(dst, obs, act, np.zeros(ldim))
         grid += track_error(obs[:, arm], act[:, arm]) / n_src
         seg = carry_segment(act[:, 6], cfg.env.gripper_closed)
         if seg is None or seg[1] - seg[0] < 2 * cm:
@@ -1005,6 +1054,8 @@ def augment_piper(cfg):
             continue
         ee, quat = fk(chain, np.radians(act[:, arm]), base)
         obs_ee = fk(chain, np.radians(obs[:, arm]), base)[0]
+        q = torch.as_tensor(np.radians(act[:, arm]), dtype=torch.float32, device=DEV)
+        near = np.linalg.norm(ee[:, :2], axis=1) < cfg.home_radius
         todo.append(
             dict(
                 obs=obs,
@@ -1015,6 +1066,9 @@ def augment_piper(cfg):
                 ee=ee,
                 quat=quat,
                 obs_ee=obs_ee,
+                pts=pc.arm_points(q).cpu().numpy(),
+                m0=int(near.argmin()),
+                m1=len(act) - int(near[::-1].argmin()),
             )
         )
 
@@ -1025,7 +1079,8 @@ def augment_piper(cfg):
     print(f"{len(todo)}/{n_src} episodes bendable")
 
     ee_err: list[np.ndarray] = []
-    written = rej_ik = 0
+    labels: list[np.ndarray] = []
+    written = rej_ik = rej_plan = rej_wall = 0
     jerk_limit = 0.6 * (50 / src.fps) ** 2
     pending = [dict(x) for x in todo for _ in range(cfg.copies)]
     bar = tqdm(total=len(pending), desc="bends")
@@ -1035,20 +1090,36 @@ def augment_piper(cfg):
         bar.write(f"attempt {attempt}: {len(pending)} pending")
         phis = np.pi * rng.uniform(cfg.bend_min, cfg.bend_max, (len(pending), 2))
         thetas = rng.uniform(0.0, np.pi, (len(pending), 2))
+        active = []
         for x, phi, theta in zip(pending, phis, thetas):
             segs = [
                 (x["opn"], x["close"] - margin),
                 (x["close"] + cm, x["opened"] - cm),
             ]
-            d = sum(
-                bend_delta(x["obs_ee"], s0, s1, p, t)
-                for (s0, s1), p, t in zip(segs, phi, theta)
-            )
-            x["label"] = (
-                phi[:, None] * np.stack([np.cos(theta), np.sin(theta)], 1)
-            ).ravel()
+            if cfg.demogen:
+                segs[0] = (x["m0"], segs[0][1])
+                segs.append((x["opened"] + cm, x["m1"]))
+                plan = plan_piper_box(x, radii, reach, rng, cfg, segs)
+                if plan is None:
+                    rej_plan += 1
+                    continue
+                center, half, d = plan
+                x["box"] = (center, half)
+                x["label"] = np.concatenate([center, half]).astype(np.float32)
+            else:
+                d = sum(
+                    bend_delta(x["obs_ee"], s0, s1, p, t)
+                    for (s0, s1), p, t in zip(segs, phi, theta)
+                )
+                x["label"] = (
+                    phi[:, None] * np.stack([np.cos(theta), np.sin(theta)], 1)
+                ).ravel()
             x["ee_t"] = x["ee"] + d
             x["bent"] = np.linalg.norm(d, axis=1) > 1e-6
+            active.append(x)
+        pending = active
+        if not pending:
+            break
 
         tm = max(len(x["act"]) for x in pending)
         na_j = solve_seq(
@@ -1072,11 +1143,23 @@ def augment_piper(cfg):
                 rejected.append(x)
                 rej_ik += 1
                 continue
+            if cfg.demogen:
+                q = torch.as_tensor(na_j[:nf, i], dtype=torch.float32, device=DEV)
+                pen = (
+                    radii
+                    + cfg.arm_margin
+                    - sdf_np(pc.arm_points(q).cpu().numpy(), *x["box"])
+                )
+                if pen.max() > 0.0:
+                    rejected.append(x)
+                    rej_wall += 1
+                    continue
             na = x["act"].copy()
             na[:, arm] = np.degrees(na_j[:nf, i])
             new_obs = x["obs"].copy()
             new_obs[:, arm] += smooth(na[:, arm] - x["act"][:, arm], alpha)
             write(dst, new_obs.astype(np.float32), na.astype(np.float32), x["label"])
+            labels.append(x["label"])
             written += 1
             bar.update(1)
             if x["bent"].any():
@@ -1084,9 +1167,16 @@ def augment_piper(cfg):
         pending = rejected
     bar.close()
 
-    total = written + len(pending)
+    total = written + len(pending) + rej_plan
     print(f"wrote {written}/{total} copies ({len(pending)} dropped after retries)")
-    print(f"rejected: {rej_ik} on IK/jerk")
+    print(f"rejected: {rej_ik} on IK/jerk, {rej_wall} on arm-box clearance")
+    if cfg.demogen:
+        print(f"dropped: {rej_plan} with no plannable box")
+        for name, col in zip(("cx", "cy", "cz", "hx", "hy", "hz"), np.stack(labels).T):
+            print(
+                f"  {name}: "
+                + " ".join(f"{v:.3f}" for v in np.percentile(col, [0, 50, 100]))
+            )
     if ee_err:
         err = np.concatenate(ee_err)
         print(
